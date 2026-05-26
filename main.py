@@ -44,7 +44,7 @@ import messages
 
 # ── Config (env vars override CLI defaults) ───────────────────────────────────
 
-VERSION = "1.7.3"
+VERSION = "1.7.4"
 DEFAULT_HOST = os.getenv("PALACE_HOST", "0.0.0.0")
 DEFAULT_PORT = int(os.getenv("PALACE_PORT", "8085"))
 DEFAULT_PALACE = os.getenv("PALACE_PATH", "")
@@ -170,6 +170,34 @@ async def _watchdog_loop(interval_secs: int) -> None:
                 _log.warning("Watchdog: palace collection unavailable — skipping WATCHDOG=1")
         except Exception as e:
             _log.warning("Watchdog check failed: %s", e)
+
+
+async def _hnsw_mtime_refresh_loop(interval_secs: int = 60) -> None:
+    """Touch data_level0.bin in every live HNSW segment every interval_secs.
+
+    quarantine_stale_hnsw fires when sqlite_mtime - hnsw_mtime >= 300s.
+    ChromaDB 1.5.x (Rust backend) never writes index_metadata.pickle, so
+    _segment_appears_healthy always returns False for non-trivial segments,
+    meaning the 300s gate is the only protection against false-positive
+    quarantines. Keeping hnsw_mtime current prevents the gap from growing.
+    """
+    palace_path = _mp._config.palace_path
+    while True:
+        await asyncio.sleep(interval_secs)
+        if _repair_state.get("in_progress"):
+            continue
+        try:
+            for name in os.listdir(palace_path):
+                if "-" not in name or name.startswith(".") or ".drift-" in name:
+                    continue
+                seg_dir = os.path.join(palace_path, name)
+                if not os.path.isdir(seg_dir):
+                    continue
+                data_bin = os.path.join(seg_dir, "data_level0.bin")
+                if os.path.isfile(data_bin):
+                    os.utime(data_bin, None)
+        except Exception as e:
+            _log.debug("HNSW mtime refresh failed (non-fatal): %s", e)
 
 
 async def _warn_if_hnsw_threads_unset() -> None:
@@ -574,6 +602,9 @@ async def lifespan(app: FastAPI):
     if wdog_secs > 0:
         asyncio.create_task(_watchdog_loop(wdog_secs))
         logger.info("Systemd watchdog active (interval=%ds, tick=%ds).", wdog_secs, max(10, wdog_secs // 2))
+
+    asyncio.create_task(_hnsw_mtime_refresh_loop())
+    logger.info("HNSW mtime refresh active (interval=60s).")
 
     yield
     

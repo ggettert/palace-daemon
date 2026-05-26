@@ -2,6 +2,11 @@
 
 # Changelog — continued
 
+## [1.7.4] - 2026-05-26
+
+### Fixed
+- **False-positive HNSW quarantine with ChromaDB 1.5.x** — `quarantine_stale_hnsw` (mempalace) marks a segment unhealthy when `index_metadata.pickle` is absent and `data_level0.bin` exceeds 1 KB. ChromaDB 1.5.x (Rust HNSW backend) never writes `index_metadata.pickle`, so every non-trivial segment failed this check regardless of health. Consequence: every `mempalace status` call or daemon restart after ≥300 s of uptime quarantined the live segment and forced a full HNSW rebuild from SQLite. Fix (daemon-side workaround): added `_hnsw_mtime_refresh_loop` — a background task that `touch`es `data_level0.bin` in every live segment every 60 s, keeping the sqlite/HNSW mtime gap below the 300 s threshold so the quarantine path is never reached. Skips during active repairs.
+
 ## [1.7.3] - 2026-05-23
 
 ### Fixed
