@@ -15,9 +15,8 @@ Roadmap:
 """
 import argparse
 import asyncio
-import contextlib
+import functools
 import hmac
-import io
 import json
 import logging
 import os
@@ -50,7 +49,7 @@ import messages
 
 # ── Config (env vars override CLI defaults) ───────────────────────────────────
 
-VERSION = "1.8.0"
+VERSION = "1.8.1"
 DEFAULT_HOST = os.getenv("PALACE_HOST", "0.0.0.0")
 DEFAULT_PORT = int(os.getenv("PALACE_PORT", "8085"))
 DEFAULT_PALACE = os.getenv("PALACE_PATH", "")
@@ -1309,57 +1308,35 @@ async def mine(request: Request, x_api_key: str | None = Header(default=None)):
 
 # ── Rebuild progress tracking ────────────────────────────────────────────────
 
+_STAGED_RE  = re.compile(r"Staged\s+(\d+)\s*/\s*(\d+)")
+_REFILED_RE = re.compile(r"Re-filed\s+(\d+)\s*/\s*(\d+)")
 
-class _RebuildProgressBuffer(io.TextIOBase):
-    """Stdout sink for rebuild_index that parses progress lines into a dict.
 
-    Lives in the executor thread (rebuild runs synchronously there) but
-    writes to a dict that /repair/status reads from the async side.
-    The dict is effectively thread-safe: each key is set atomically and
-    /repair/status only reads — no torn-read risk on CPython.
+def _make_rebuild_progress_callback(state: dict):
+    """Return a progress callable for rebuild_index (mempalace >=3.3.6).
+
+    The callable is thread-safe on CPython: each key write is atomic and
+    /repair/status only reads — no torn-read risk.
     """
-
-    _STAGED  = re.compile(r"Staged\s+(\d+)\s*/\s*(\d+)")
-    _REFILED = re.compile(r"Re-filed\s+(\d+)\s*/\s*(\d+)")
-
-    def __init__(self, state: dict):
-        self._state = state
-
-    def write(self, s: str) -> int:
-        for line in s.splitlines():
-            m = self._STAGED.search(line)
-            if m:
-                self._state["staged_current"] = int(m.group(1))
-                self._state["staged_total"]   = int(m.group(2))
-                continue
-            m = self._REFILED.search(line)
-            if m:
-                cur, total = int(m.group(1)), int(m.group(2))
-                self._state["refiled_current"] = cur
-                self._state["refiled_total"]   = total
-                if total > 0:
-                    elapsed = _time.monotonic() - self._state.get("_start_mono", _time.monotonic())
-                    if cur > 0 and elapsed > 0:
-                        rate = cur / elapsed
-                        remaining = (total - cur) / rate
-                        self._state["eta_seconds"] = round(remaining, 1)
-        return len(s)
-
-    def flush(self):
-        pass
-
-
-@contextlib.contextmanager
-def _capture_rebuild_progress(state: dict):
-    """Redirect stdout to a parser that updates ``state`` while we're inside."""
     state["_start_mono"] = _time.monotonic()
-    buf = _RebuildProgressBuffer(state)
-    old = sys.stdout
-    sys.stdout = buf
-    try:
-        yield buf
-    finally:
-        sys.stdout = old
+
+    def _cb(msg: str) -> None:
+        m = _STAGED_RE.search(msg)
+        if m:
+            state["staged_current"] = int(m.group(1))
+            state["staged_total"]   = int(m.group(2))
+            return
+        m = _REFILED_RE.search(msg)
+        if m:
+            cur, total = int(m.group(1)), int(m.group(2))
+            state["refiled_current"] = cur
+            state["refiled_total"]   = total
+            if total > 0 and cur > 0:
+                elapsed = _time.monotonic() - state["_start_mono"]
+                if elapsed > 0:
+                    state["eta_seconds"] = round((total - cur) / (cur / elapsed), 1)
+
+    return _cb
 
 
 # ── Repair + silent-save ─────────────────────────────────────────────────────
@@ -1600,10 +1577,11 @@ async def repair(request: Request, x_api_key: str | None = Header(default=None))
                 _mp._client_cache = None
                 _mp._collection_cache = None
                 _repair_state["progress"] = {}
-                with _capture_rebuild_progress(_repair_state["progress"]):
-                    await loop.run_in_executor(
-                        None, _mp_repair.rebuild_index, palace_path
-                    )
+                progress_cb = _make_rebuild_progress_callback(_repair_state["progress"])
+                rebuild_fn = functools.partial(
+                    _mp_repair.rebuild_index, palace_path, progress=progress_cb
+                )
+                await loop.run_in_executor(None, rebuild_fn)
                 result = {"rebuilt": True}
             await _warn_if_hnsw_threads_unset()
 

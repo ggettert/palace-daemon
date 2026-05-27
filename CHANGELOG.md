@@ -2,6 +2,12 @@
 
 # Changelog — continued
 
+## [1.8.1] - 2026-05-27
+
+### Changed
+- **mempalace upgraded to 3.3.6** — key fixes relevant to daemon operation: HNSW quarantine integrity gate (avoids false-quarantine when `dimensionality=None` but payload is sane), FTS5 validation at mine end, mine concurrency lock, MCP idle auto-exit (reduces stale ChromaDB handles). Note: `_hnsw_mtime_refresh_loop` workaround (v1.7.4) remains necessary — 3.3.6's integrity gate still returns unhealthy for segments with no `index_metadata.pickle` and >1KB `data_level0.bin`, which is all ChromaDB 1.5.x segments.
+- **Repair progress tracking refactored** — replaced the stdout-redirect hack (`_RebuildProgressBuffer` + `sys.stdout = buf`) with the proper `progress=` callback added to `rebuild_index` in mempalace 3.3.6 (jphein's PR #1487). Uses `functools.partial` to thread the callback into the executor call. Cleaner, forward-compatible, and won't silently break if upstream changes its print format. Removed `import contextlib`, `import io` (now unused).
+
 ## [1.8.0] - 2026-05-27
 
 ### Added
