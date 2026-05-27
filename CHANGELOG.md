@@ -2,6 +2,15 @@
 
 # Changelog — continued
 
+## [1.8.0] - 2026-05-27
+
+### Added
+- **Verified backups** — `/backup` now performs three-step verification before reporting success: (1) `sqlite3.backup()` snapshot, (2) `PRAGMA integrity_check` on the backup file, (3) smoke retrieval — opens backup read-only and queries `embedding_metadata LIMIT 5`. Returns a structured response: `{backup_path, timestamp, integrity, smoke_test, rows_sampled, status}` where `status` is `"ok"` or `"degraded"`. Backup file is always kept on failure for forensics. All sync I/O runs via `loop.run_in_executor`. Empty palaces (no `embedding_metadata` table) return `smoke_test: "WARN: ..."` rather than a failure.
+- **Crash-loop configurable thresholds** — `_CRASH_LOOP_WINDOW`, `_CRASH_LOOP_THRESHOLD`, and a new `_CRASH_LOOP_RECOVERY` constant are now readable from env vars `PALACE_CRASH_LOOP_THRESHOLD_SECONDS` (default 600), `PALACE_CRASH_LOOP_THRESHOLD_COUNT` (default 3), and `PALACE_CRASH_LOOP_RECOVERY_SECONDS` (default 1800).
+- **Crash-loop auto-recovery** — if the daemon has been running longer than `_CRASH_LOOP_RECOVERY` seconds, `_crash_loop_state()` returns `crash_loop: False, recovered: True`, and `/health` returns 200 again without manual intervention. `uptime_seconds` is now included in the state dict.
+- **Crash-loop desktop notification** — on crash-loop detection at startup, fires `notify-send --urgency=critical` so the operator sees it without watching logs. Silently catches `FileNotFoundError` for headless/container environments. Closes #21.
+- **Repair rebuild progress + ETA in `/repair/status`** — during a `mode=rebuild` repair, `/repair/status` now includes a `progress` key with `staged_current`, `staged_total`, `refiled_current`, `refiled_total`, and `eta_seconds` (ETA derived from per-drawer throughput). Implemented via `_RebuildProgressBuffer` (a `TextIOBase` subclass that captures `rebuild_index` stdout) and `_capture_rebuild_progress` context manager. `_internal` keys (e.g. `_start_mono`) are filtered from the API response.
+
 ## [1.7.5] - 2026-05-27
 
 ### Fixed
