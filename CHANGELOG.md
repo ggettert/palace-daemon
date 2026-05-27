@@ -2,6 +2,16 @@
 
 # Changelog — continued
 
+## [1.7.5] - 2026-05-27
+
+### Fixed
+- **Security: constant-time API key comparison** — replaced `!=` with `hmac.compare_digest` in `_check_auth()` to prevent timing side-channel attacks. Also handles `x_api_key=None` gracefully (no 500 on missing header when auth is enabled).
+- **Hook auth: X-API-Key missing from daemon HTTP calls** — added `_auth_headers()` helper to `clients/hook.py` that reads `PALACE_API_KEY` from env and injects the `X-Api-Key` header into all three hook POST functions (`_post_digest`, `_post_mcp`, `_post_mine`). Without this, hooks silently received 401 from an auth-enabled daemon.
+- **Repair deadlock: client cache cleared before rebuild** — `_mp._client_cache` and `_mp._collection_cache` are now dropped *before* `rebuild_index` runs, not after. The previous order left the cached `PersistentClient` holding the SQLite lock during the rebuild, causing a deadlock under ChromaDB 1.x.
+- **Hook exchange counter: tool_result messages miscounted** — `_count_human_messages` was incrementing for human-turn entries whose entire content was `tool_result` blocks (no text). These are tool roundtrips, not human exchanges. Fixed by requiring at least one `text`-type block before counting. Also self-heals a backward counter: if `last_save > exchange_count` (can happen after a count-rule change), `last_save` is rebased to `exchange_count` with a log entry so `since_last` never goes negative.
+- **Hook Stop/PreCompact killed by harness pipe closure** — added `_detach()` to `clients/hook.py`: forks a background child that becomes a session leader (`setsid`) and redirects all three stdio FDs to `/dev/null`. The parent prints the harness response and exits immediately; the child does the slow diary save or mine without risking SIGPIPE when the harness closes its end. Falls back to synchronous execution if `fork()` fails.
+- **`POST /mine` concurrent ChromaDB client corrupts log store** — `/mine` spawned `mempalace mine` as a subprocess that opened its own `PersistentClient` on the palace path while the daemon already held one. Two `PersistentClient` instances on one chroma path corrupt the Rust log store (in- or cross-process), causing drawers to silently persist nowhere. Fix: on chroma, the mine is now wrapped in an `_exclusive_palace()` lock + `_drop_chroma_client(close=True)` + subprocess + reopen in `finally`, making the subprocess the sole client for the duration. On postgres, concurrent connections are native so the original `_mine_sem` path is kept. Includes 4 unit tests (`tests/test_mine_backend_aware.py`). `PALACE_CHROMA_FLUSH_SECONDS` (default `0.0`) env var available as a post-close settle margin.
+
 ## [1.7.4] - 2026-05-26
 
 ### Fixed
