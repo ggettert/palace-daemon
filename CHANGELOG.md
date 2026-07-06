@@ -2,6 +2,11 @@
 
 # Changelog — continued
 
+## [1.8.2] - 2026-07-06
+
+### Fixed
+- **systemd: restart-rate throttling silently disabled** — `StartLimitBurst`/`StartLimitIntervalSec` were placed in `[Service]` instead of `[Unit]`, which systemd ignores with a logged warning rather than an error. This let the daemon retry every `RestartSec` indefinitely instead of stopping after `StartLimitBurst` failures within `StartLimitIntervalSec`. Surfaced on a fresh deploy that crash-looped 400+ times in ~35 minutes while wired into `multi-user.target`, making the host appear to hang at boot.
+
 ## [1.8.1] - 2026-05-27
 
 ### Changed
