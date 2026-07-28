@@ -772,10 +772,10 @@ def _request_policy(
     if method == "POST" and path == "/memory":
         return "write", body.get("wing", "general") if isinstance(body.get("wing", "general"), str) else None
     if method == "POST" and path in {"/silent-save", "/digest"}:
-        # These handlers intentionally use an empty wing when omitted. Match
-        # that behavior so scoped keys fail closed instead of authorizing
-        # "general" and writing elsewhere.
-        return "write", body.get("wing", "") if isinstance(body.get("wing", ""), str) else None
+        # Their handlers use an empty wing when it is omitted. It cannot be
+        # authorized as a named target, so only unrestricted keys may proceed.
+        wing = body.get("wing")
+        return "write", wing if isinstance(wing, str) and wing else None
     if method == "POST" and path == "/mine":
         # Importing an arbitrary server path is administrative even though it
         # writes a named wing.

@@ -106,9 +106,10 @@ class ScopedRouteAuthorizationTestCase(unittest.TestCase):
                 {"name": "operator", "key": "operator-secret-012345", "operations": ["read", "write", "admin"], "wings": ["*"]},
             ]}, handle)
         os.chmod(self.key_file, stat.S_IRUSR | stat.S_IWUSR)
+        self.env = {"PALACE_API_KEYS_FILE": self.key_file}
         self.environ = patch.dict(
             os.environ,
-            {"PALACE_API_KEYS_FILE": self.key_file, "PALACE_API_KEY": ""},
+            {**self.env, "PALACE_API_KEY": ""},
             clear=False,
         )
         self.environ.start()
@@ -200,14 +201,39 @@ class ScopedRouteAuthorizationTestCase(unittest.TestCase):
                     403,
                 )
 
-    def test_silent_save_and_digest_omitted_wing_fail_closed(self):
+    def test_silent_save_and_digest_omitted_wing_require_unrestricted_write(self):
         for path in ["/silent-save", "/digest"]:
             with self.subTest(path=path):
-                self.assertEqual(main._request_policy("POST", path, {}, {})[1], "")
+                operation, wing = main._request_policy("POST", path, {}, {})
+                self.assertEqual(operation, "write")
+                self.assertIsNone(wing)
+                self.assertEqual(
+                    authorize("operator-secret-012345", operation, wing, self.env), "operator"
+                )
+                with self.assertRaises(AuthorizationError):
+                    authorize("writer-secret-012345", operation, wing, self.env)
                 self.assertEqual(
                     self.request("POST", path, "writer-secret-012345", json={"entry": "ok"}).status_code,
                     403,
                 )
+                if path == "/silent-save":
+                    with patch.object(
+                        main, "_do_silent_save_write", new=AsyncMock(return_value={"success": True})
+                    ):
+                        response = self.request(
+                            "POST", path, "operator-secret-012345", json={"entry": "ok"}
+                        )
+                    self.assertEqual(response.status_code, 200)
+                else:
+                    with (
+                        patch.object(main, "ANTHROPIC_API_KEY", "test-key"),
+                        patch.object(main, "_anthropic", object()),
+                        patch.object(main, "_run_digest", new=AsyncMock()),
+                    ):
+                        response = self.request(
+                            "POST", path, "operator-secret-012345", json={"messages": []}
+                        )
+                    self.assertEqual(response.status_code, 202)
 
 
 class ProtectedWingPermissionTestCase(unittest.TestCase):

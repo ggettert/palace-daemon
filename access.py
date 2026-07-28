@@ -187,8 +187,8 @@ def _parse_key_ring(raw: object) -> tuple[KeyGrant, ...]:
             operations = entry["operations"]
             if not isinstance(operations, list) or not operations or any(op not in VALID_OPERATIONS for op in operations):
                 raise KeyRingConfigurationError("operations must be a non-empty list of read, write, and/or admin")
-            # Legacy rings historically accepted duplicate names; retain that
-            # behavior while normalizing them into the in-memory set.
+            # Legacy rings historically accepted duplicate wing names; retain
+            # that behavior while normalizing them into the in-memory set.
             wings = _parse_wings(
                 entry["wings"], "wings", allow_wildcard=True, reject_duplicates=False
             )
@@ -263,7 +263,7 @@ def _requested_wings(wing: str | Iterable[str] | None) -> tuple[str, ...] | None
     if wing is None:
         return None
     if isinstance(wing, str):
-        return (wing,) if wing else ()
+        return (wing,) if wing else None
     wings = tuple(wing)
     if not wings or any(not isinstance(item, str) or not item for item in wings):
         return ()
