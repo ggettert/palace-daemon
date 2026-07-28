@@ -266,16 +266,28 @@ _READ_TOOLS = {
     "mempalace_check_duplicate",
     "mempalace_get_taxonomy",
     "mempalace_get_aaak_spec",
+}
+
+# Import, index/cache maintenance, and configuration-changing tools are
+# privileged even though some of them also write a named wing. Keep this list
+# explicit so new tools fail closed as writes rather than silently inheriting
+# broader permissions.
+_ADMIN_TOOLS = {
+    "mempalace_mine",
+    "mempalace_sync",
+    "mempalace_reconnect",
+    "mempalace_memories_filed_away",
+    "mempalace_checkpoint",
     "mempalace_hook_settings",
 }
 
 
 def _check_auth(x_api_key: str | None):
-    """Compatibility guard for direct endpoint calls outside ASGI middleware.
+    """Validate a presented API key for direct endpoint compatibility only.
 
-    HTTP requests are authorized with route and wing context by the middleware
-    below. Keeping this token check means existing in-process callers cannot
-    bypass a configured ring merely by calling an endpoint coroutine directly.
+    Route operation and wing scope are enforced by ASGI middleware. Direct
+    callers that need scoped authorization must call ``authorize`` with their
+    own operation and wing context before invoking an endpoint coroutine.
     """
     try:
         authenticate(x_api_key)
@@ -701,9 +713,7 @@ _MCP_WING_ARGUMENTS = {
 def _mcp_operation(tool_name: str) -> str:
     if tool_name in _READ_TOOLS:
         return "read"
-    if tool_name.startswith("mempalace_delete_") or tool_name in {
-        "mempalace_sync", "mempalace_reconnect",
-    }:
+    if tool_name.startswith("mempalace_delete_") or tool_name in _ADMIN_TOOLS:
         return "admin"
     return "write"
 
@@ -736,8 +746,13 @@ def _request_policy(method: str, path: str, query: dict[str, str], body: dict) -
         return "read", query.get("wing")
     if method == "POST" and path == "/mcp":
         return _mcp_policy(body)
-    if method == "POST" and path in {"/memory", "/silent-save", "/digest"}:
+    if method == "POST" and path == "/memory":
         return "write", body.get("wing", "general") if isinstance(body.get("wing", "general"), str) else None
+    if method == "POST" and path in {"/silent-save", "/digest"}:
+        # These handlers intentionally use an empty wing when omitted. Match
+        # that behavior so scoped keys fail closed instead of authorizing
+        # "general" and writing elsewhere.
+        return "write", body.get("wing", "") if isinstance(body.get("wing", ""), str) else None
     if method == "POST" and path == "/mine":
         # Importing an arbitrary server path is administrative even though it
         # writes a named wing.

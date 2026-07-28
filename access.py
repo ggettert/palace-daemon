@@ -34,11 +34,31 @@ class KeyGrant:
         return "*" in self.wings
 
 
-def _require_safe_file(path: Path) -> None:
+@dataclass(frozen=True)
+class _KeyRingFileState:
+    """Metadata that invalidates a cached key ring after a safe rotation."""
+
+    device: int
+    inode: int
+    size: int
+    mtime_ns: int
+    ctime_ns: int
+    mode: int
+    uid: int
+
+
+_key_ring_cache: dict[Path, tuple[_KeyRingFileState, tuple[KeyGrant, ...]]] = {}
+
+
+def _require_safe_file(path: Path) -> _KeyRingFileState:
     try:
-        info = path.stat()
+        # lstat is intentional: a key-ring path must never redirect through a
+        # symlink, even when its target is an otherwise-safe regular file.
+        info = path.lstat()
     except OSError as exc:
-        raise KeyRingConfigurationError(f"cannot stat PALACE_API_KEYS_FILE: {exc}") from exc
+        raise KeyRingConfigurationError(f"cannot lstat PALACE_API_KEYS_FILE: {exc}") from exc
+    if stat.S_ISLNK(info.st_mode):
+        raise KeyRingConfigurationError("PALACE_API_KEYS_FILE must not be a symlink")
     if not stat.S_ISREG(info.st_mode):
         raise KeyRingConfigurationError("PALACE_API_KEYS_FILE must be a regular file")
     if info.st_uid != os.geteuid():
@@ -47,6 +67,15 @@ def _require_safe_file(path: Path) -> None:
         raise KeyRingConfigurationError(
             "PALACE_API_KEYS_FILE must not be readable or writable by group/other (chmod 600)"
         )
+    return _KeyRingFileState(
+        device=info.st_dev,
+        inode=info.st_ino,
+        size=info.st_size,
+        mtime_ns=info.st_mtime_ns,
+        ctime_ns=info.st_ctime_ns,
+        mode=stat.S_IMODE(info.st_mode),
+        uid=info.st_uid,
+    )
 
 
 def _parse_key_ring(raw: object) -> tuple[KeyGrant, ...]:
@@ -96,12 +125,26 @@ def load_key_ring(env: Mapping[str, str] | None = None) -> tuple[KeyGrant, ...]:
         raise KeyRingConfigurationError("set either PALACE_API_KEYS_FILE or PALACE_API_KEY, not both")
     if config_path:
         path = Path(config_path).expanduser()
-        _require_safe_file(path)
-        try:
-            raw = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            raise KeyRingConfigurationError(f"invalid PALACE_API_KEYS_FILE: {exc}") from exc
-        return _parse_key_ring(raw)
+        # A rotation may happen between lstat and read. Retry once and only
+        # cache data whose metadata is unchanged across the read.
+        for _ in range(2):
+            state = _require_safe_file(path)
+            cached = _key_ring_cache.get(path)
+            if cached is not None and cached[0] == state:
+                return cached[1]
+            try:
+                raw = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                raise KeyRingConfigurationError(f"invalid PALACE_API_KEYS_FILE: {exc}") from exc
+            if _require_safe_file(path) != state:
+                continue
+            ring = _parse_key_ring(raw)
+            # Cache only after the complete validation path succeeds. The state
+            # contains inode, timestamps, ownership, and mode so atomic rotations
+            # and in-place edits reload safely on the next request.
+            _key_ring_cache[path] = (state, ring)
+            return ring
+        raise KeyRingConfigurationError("PALACE_API_KEYS_FILE changed while being read")
     if legacy_key:
         return (KeyGrant("legacy-palace-api-key", legacy_key, VALID_OPERATIONS, frozenset({"*"})),)
     return ()

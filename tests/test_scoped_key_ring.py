@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, patch
 from fastapi.testclient import TestClient
 
 import main
+import access
 from access import AuthorizationError, KeyRingConfigurationError, authorize, load_key_ring
 
 
@@ -57,6 +58,30 @@ class KeyRingTestCase(unittest.TestCase):
         os.chmod(self.key_file, 0o600)
         with self.assertRaises(KeyRingConfigurationError):
             load_key_ring({"PALACE_API_KEYS_FILE": self.key_file, "PALACE_API_KEY": "legacy-secret-012345"})
+
+    def test_rejects_symlinked_key_ring(self):
+        symlink = os.path.join(self.tempdir.name, "keys-link.json")
+        os.symlink(self.key_file, symlink)
+        with self.assertRaisesRegex(KeyRingConfigurationError, "must not be a symlink"):
+            load_key_ring({"PALACE_API_KEYS_FILE": symlink})
+
+    def test_key_ring_cache_reuses_unchanged_file_and_reloads_rotation(self):
+        access._key_ring_cache.clear()
+        with patch("access.json.loads", wraps=json.loads) as loads:
+            self.assertEqual(load_key_ring(self.env)[0].name, "reader")
+            self.assertEqual(load_key_ring(self.env)[0].name, "reader")
+            self.assertEqual(loads.call_count, 1)
+
+            rotated = os.path.join(self.tempdir.name, "rotated.json")
+            with open(rotated, "w", encoding="utf-8") as handle:
+                json.dump({"keys": [
+                    {"name": "rotated", "key": "rotated-secret-012345", "operations": ["read"], "wings": ["alpha"]},
+                ]}, handle)
+            os.chmod(rotated, 0o600)
+            os.replace(rotated, self.key_file)
+
+            self.assertEqual(load_key_ring(self.env)[0].name, "rotated")
+            self.assertEqual(loads.call_count, 2)
 
 
 class ScopedRouteAuthorizationTestCase(unittest.TestCase):
@@ -129,6 +154,32 @@ class ScopedRouteAuthorizationTestCase(unittest.TestCase):
         self.assertEqual(self.request("POST", "/mcp", "reader-secret-012345", json=body).status_code, 403)
         body["params"] = {"name": "mempalace_search", "arguments": {"query": "x", "wing": "alpha"}}
         self.assertEqual(self.request("POST", "/mcp", "reader-secret-012345", json=body).status_code, 200)
+
+    def test_mcp_import_and_maintenance_tools_require_admin(self):
+        for tool_name in [
+            "mempalace_mine",
+            "mempalace_sync",
+            "mempalace_reconnect",
+            "mempalace_memories_filed_away",
+            "mempalace_checkpoint",
+            "mempalace_hook_settings",
+        ]:
+            with self.subTest(tool_name=tool_name):
+                body = {"params": {"name": tool_name, "arguments": {"wing": "alpha"}}}
+                self.assertEqual(main._mcp_policy(body)[0], "admin")
+                self.assertEqual(
+                    self.request("POST", "/mcp", "writer-secret-012345", json=body).status_code,
+                    403,
+                )
+
+    def test_silent_save_and_digest_omitted_wing_fail_closed(self):
+        for path in ["/silent-save", "/digest"]:
+            with self.subTest(path=path):
+                self.assertEqual(main._request_policy("POST", path, {}, {})[1], "")
+                self.assertEqual(
+                    self.request("POST", path, "writer-secret-012345", json={"entry": "ok"}).status_code,
+                    403,
+                )
 
 
 if __name__ == "__main__":
