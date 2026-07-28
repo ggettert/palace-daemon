@@ -29,8 +29,7 @@ To prevent database corruption, this project enforces a strict **Single-Process 
 - **REST API** — search, store, and query the palace over HTTP (Android app, netdash, scripts)
 - **Concurrent access control** — three semaphores coordinate reads, writes, and mine jobs; tunable via `PALACE_MAX_READ_CONCURRENCY` / `PALACE_MAX_WRITE_CONCURRENCY`
 - **Isolated mining** — /mine runs under its own semaphore so bulk imports never stall live traffic
-- **Scoped API-key ring** — named opaque keys can be limited to read/write/admin
-  operations and specific wings
+- **Scoped API-key ring** — named opaque keys can be limited to read/write/admin operations and specific wings
 
 ## Requirements
 
@@ -60,18 +59,13 @@ To prevent database corruption, this project enforces a strict **Single-Process 
 > The `/mine` endpoint accepts arbitrary filesystem paths — anyone with access
 > can trigger reads from any directory on your server.
 
-For local network use, leaving auth disabled is fine. For remote access,
-always configure a key ring (or, temporarily during migration, the legacy API
-key):
+For local network use, leaving auth disabled is fine. For remote access, always configure a key ring (or, temporarily during migration, the legacy API key):
 
     PALACE_API_KEY=your-secret python main.py
 
 ### Scoped API-key ring
 
-Prefer `PALACE_API_KEYS_FILE` for servers. It points to a JSON file owned by
-the daemon user with mode `0600`; the daemon refuses group/world-accessible,
-non-regular, malformed, or ambiguous configuration files. Do not put this
-file in source control, an image, or a command line.
+Prefer `PALACE_API_KEYS_FILE` for servers. It points to a JSON file owned by the daemon user with mode `0600`; the daemon refuses group/world-accessible, non-regular, malformed, or ambiguous configuration files. Do not put this file in source control, an image, or a command line.
 
 ```json
 {
@@ -98,24 +92,11 @@ install -m 600 /dev/null /etc/palace-daemon/keys.json
 PALACE_API_KEYS_FILE=/etc/palace-daemon/keys.json python main.py --manual
 ```
 
-`name` is the non-secret audit identity written to daemon logs. `key` values
-are independent opaque secrets (minimum 16 characters), never logged.
-`operations` are explicit: `read` for retrieval, `write` for named-wing
-creates/checkpoints, and `admin` for maintenance, imports, repair, backups,
-and deletion. Include every operation a client needs; permissions do not
-implicitly expand. `wings: ["*"]` is the only unrestricted form.
+`name` is the non-secret audit identity written to daemon logs. `key` values are independent opaque secrets (minimum 16 characters), never logged. `operations` are explicit: `read` for retrieval, `write` for named-wing creates/checkpoints, and `admin` for maintenance, imports, repair, backups, and deletion. Include every operation a client needs; permissions do not implicitly expand. `wings: ["*"]` is the only unrestricted form.
 
-Restricted keys must supply a wing to read or write and cannot call
-cross-wing endpoints (`/stats`, `/graph`, `/health`, `/repair/status`) or
-drawer-ID mutations, because those could disclose another wing. Use an
-unrestricted maintenance key for those operations. The same fail-closed rule
-applies to MCP tools whose target wing cannot be determined.
+Restricted keys must supply a wing to read or write and cannot call cross-wing endpoints (`/stats`, `/graph`, `/health`, `/repair/status`) or drawer-ID mutations, because those could disclose another wing. Use an unrestricted maintenance key for those operations. The same fail-closed rule applies to MCP tools whose target wing cannot be determined.
 
-The existing `PALACE_API_KEY` remains supported as a migration path. It creates
-an in-memory `legacy-palace-api-key` grant with all operations and all wings.
-Set **either** `PALACE_API_KEYS_FILE` **or** `PALACE_API_KEY`, never both.
-All HTTP endpoints, including health and status, require `X-Api-Key` when
-either setting is configured. Query-string keys are not accepted.
+The existing `PALACE_API_KEY` remains supported as a migration path. It creates an in-memory `legacy-palace-api-key` grant with all operations and all wings. Set **either** `PALACE_API_KEYS_FILE` **or** `PALACE_API_KEY`, never both. All HTTP endpoints, including health and status, require `X-Api-Key` when either setting is configured. Query-string keys are not accepted.
 
 ## systemd
 
@@ -146,9 +127,7 @@ Only runs while you're logged in. Use this if you don't have sudo or only need t
 >     rm ~/.config/systemd/user/palace-daemon.service
 >     systemctl --user daemon-reload
 
-Edit `palace-daemon.service` to set `PALACE_API_KEYS_FILE` (preferred),
-`PALACE_API_KEY` during migration, or a custom `--palace` path before
-installing.
+Edit `palace-daemon.service` to set `PALACE_API_KEYS_FILE` (preferred), `PALACE_API_KEY` during migration, or a custom `--palace` path before installing.
 
 The service uses `Type=notify` and `WatchdogSec=120`: the daemon signals systemd when it is ready and sends a watchdog heartbeat every 60 s. If the watchdog goes silent (e.g. the palace collection breaks), systemd kills and restarts the daemon automatically.
 
@@ -256,10 +235,7 @@ Example env for the hook invocation (in Claude Code hooks config, or upstream of
 
 ### Auth
 
-When authentication is configured, pass `X-Api-Key: your-secret` on every
-request, including `/health`. Never put a key in a URL. Browser access to
-`/viz` needs a trusted reverse proxy that injects the header or another
-header-capable client; query-string keys are intentionally rejected.
+When authentication is configured, pass `X-Api-Key: your-secret` on every request, including `/health`. Never put a key in a URL. Browser access to `/viz` needs a trusted reverse proxy that injects the header or another header-capable client; query-string keys are intentionally rejected.
 
 
 ## Clients
