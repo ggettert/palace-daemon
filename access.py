@@ -5,9 +5,9 @@ import hmac
 import json
 import os
 import stat
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Mapping
 
 VALID_OPERATIONS = frozenset({"read", "write", "admin"})
 
@@ -21,17 +21,36 @@ class AuthorizationError(PermissionError):
 
 
 @dataclass(frozen=True)
+class WingPermission:
+    """The wing allow/deny rule for one operation."""
+
+    allow: frozenset[str]
+    deny: frozenset[str] = frozenset()
+
+    @property
+    def unrestricted(self) -> bool:
+        """Whether an operation can safely run without a named wing."""
+        return self.allow == frozenset({"*"}) and not self.deny
+
+    def permits(self, wing: str) -> bool:
+        return wing not in self.deny and ("*" in self.allow or wing in self.allow)
+
+
+@dataclass(frozen=True)
 class KeyGrant:
-    """A named opaque token and its least-privilege grant."""
+    """A named opaque token and its least-privilege per-operation grants."""
 
     name: str
     secret: str
-    operations: frozenset[str]
-    wings: frozenset[str]
+    permissions: Mapping[str, WingPermission]
 
     @property
-    def unrestricted_wings(self) -> bool:
-        return "*" in self.wings
+    def operations(self) -> frozenset[str]:
+        """Compatibility view of operations configured for this key."""
+        return frozenset(self.permissions)
+
+    def permission_for(self, operation: str) -> WingPermission | None:
+        return self.permissions.get(operation)
 
 
 @dataclass(frozen=True)
@@ -109,6 +128,40 @@ def _read_safe_key_ring(path: Path, expected_state: _KeyRingFileState) -> object
             os.close(fd)
 
 
+def _parse_wings(
+    value: object, field: str, *, allow_wildcard: bool, reject_duplicates: bool = True
+) -> frozenset[str]:
+    if not isinstance(value, list) or not value or any(not isinstance(wing, str) or not wing for wing in value):
+        raise KeyRingConfigurationError(f"{field} must be a non-empty list of wing names")
+    if reject_duplicates and len(set(value)) != len(value):
+        raise KeyRingConfigurationError(f"{field} must not contain duplicate wing names")
+    if "*" in value and (not allow_wildcard or len(value) != 1):
+        raise KeyRingConfigurationError(f'{field} may contain "*" only by itself')
+    return frozenset(value)
+
+
+def _parse_permissions(value: object) -> dict[str, WingPermission]:
+    if not isinstance(value, dict) or not value:
+        raise KeyRingConfigurationError("permissions must be a non-empty object keyed by operation")
+    permissions: dict[str, WingPermission] = {}
+    for operation, scope in value.items():
+        if operation not in VALID_OPERATIONS:
+            raise KeyRingConfigurationError("permissions may contain only read, write, and/or admin")
+        if not isinstance(scope, dict) or not {"allow"} <= set(scope) or set(scope) - {"allow", "deny"}:
+            raise KeyRingConfigurationError("each permission must contain allow and optional deny only")
+        allow = _parse_wings(scope["allow"], f"permissions.{operation}.allow", allow_wildcard=True)
+        deny_value = scope.get("deny", [])
+        if not isinstance(deny_value, list) or any(not isinstance(wing, str) or not wing or wing == "*" for wing in deny_value):
+            raise KeyRingConfigurationError(f"permissions.{operation}.deny must be a list of named wings")
+        if len(set(deny_value)) != len(deny_value):
+            raise KeyRingConfigurationError(f"permissions.{operation}.deny must not contain duplicate wing names")
+        deny = frozenset(deny_value)
+        if "*" not in allow and allow & deny:
+            raise KeyRingConfigurationError(f"permissions.{operation}.allow and deny must not overlap")
+        permissions[operation] = WingPermission(allow, deny)
+    return permissions
+
+
 def _parse_key_ring(raw: object) -> tuple[KeyGrant, ...]:
     if not isinstance(raw, dict) or set(raw) != {"keys"} or not isinstance(raw["keys"], list):
         raise KeyRingConfigurationError('key-ring JSON must be exactly {"keys": [...]}')
@@ -118,27 +171,35 @@ def _parse_key_ring(raw: object) -> tuple[KeyGrant, ...]:
     grants: list[KeyGrant] = []
     names: set[str] = set()
     secrets: set[str] = set()
+    legacy_fields = {"name", "key", "operations", "wings"}
+    scoped_fields = {"name", "key", "permissions"}
     for entry in raw["keys"]:
-        if not isinstance(entry, dict) or set(entry) != {"name", "key", "operations", "wings"}:
-            raise KeyRingConfigurationError("each key must contain only name, key, operations, and wings")
-        name, secret, operations, wings = (
-            entry["name"], entry["key"], entry["operations"], entry["wings"]
-        )
+        if not isinstance(entry, dict) or (set(entry) != legacy_fields and set(entry) != scoped_fields):
+            raise KeyRingConfigurationError(
+                "each key must use legacy name, key, operations, wings or name, key, permissions"
+            )
+        name, secret = entry["name"], entry["key"]
         if not isinstance(name, str) or not name or len(name) > 128:
             raise KeyRingConfigurationError("key name must be a non-empty string of at most 128 characters")
         if not isinstance(secret, str) or len(secret) < 16:
             raise KeyRingConfigurationError("each opaque key must be a string of at least 16 characters")
-        if not isinstance(operations, list) or not operations or any(op not in VALID_OPERATIONS for op in operations):
-            raise KeyRingConfigurationError("operations must be a non-empty list of read, write, and/or admin")
-        if not isinstance(wings, list) or not wings or any(not isinstance(wing, str) or not wing for wing in wings):
-            raise KeyRingConfigurationError("wings must be a non-empty list of wing names or [\"*\"]")
-        if "*" in wings and len(wings) != 1:
-            raise KeyRingConfigurationError('wings may contain "*" only by itself')
+        if set(entry) == legacy_fields:
+            operations = entry["operations"]
+            if not isinstance(operations, list) or not operations or any(op not in VALID_OPERATIONS for op in operations):
+                raise KeyRingConfigurationError("operations must be a non-empty list of read, write, and/or admin")
+            # Legacy rings historically accepted duplicate wing names; retain
+            # that behavior while normalizing them into the in-memory set.
+            wings = _parse_wings(
+                entry["wings"], "wings", allow_wildcard=True, reject_duplicates=False
+            )
+            permissions = {operation: WingPermission(wings) for operation in operations}
+        else:
+            permissions = _parse_permissions(entry["permissions"])
         if name in names or secret in secrets:
             raise KeyRingConfigurationError("key names and opaque keys must each be unique")
         names.add(name)
         secrets.add(secret)
-        grants.append(KeyGrant(name, secret, frozenset(operations), frozenset(wings)))
+        grants.append(KeyGrant(name, secret, permissions))
     return tuple(grants)
 
 
@@ -174,7 +235,8 @@ def load_key_ring(env: Mapping[str, str] | None = None) -> tuple[KeyGrant, ...]:
             return ring
         raise KeyRingConfigurationError("PALACE_API_KEYS_FILE changed while being read")
     if legacy_key:
-        return (KeyGrant("legacy-palace-api-key", legacy_key, VALID_OPERATIONS, frozenset({"*"})),)
+        all_wings = WingPermission(frozenset({"*"}))
+        return (KeyGrant("legacy-palace-api-key", legacy_key, {operation: all_wings for operation in VALID_OPERATIONS}),)
     return ()
 
 
@@ -197,21 +259,41 @@ def authenticate(presented_key: str | None, env: Mapping[str, str] | None = None
     return matched
 
 
+def _requested_wings(wing: str | Iterable[str] | None) -> tuple[str, ...] | None:
+    if wing is None:
+        return None
+    if isinstance(wing, str):
+        return (wing,) if wing else None
+    wings = tuple(wing)
+    if not wings or any(not isinstance(item, str) or not item for item in wings):
+        return ()
+    return wings
+
+
 def authorize(
     presented_key: str | None,
     operation: str,
-    wing: str | None,
+    wing: str | Iterable[str] | None,
     env: Mapping[str, str] | None = None,
 ) -> str:
-    """Authorize a request and return a non-secret audit identity."""
+    """Authorize an operation against every target wing and return audit identity.
+
+    A request with no determinable wing is allowed only by an unrestricted rule.
+    This prevents a rule with protected-wing denies from bypassing those denies
+    through cross-wing endpoints or MCP tools with opaque identifiers.
+    """
     if operation not in VALID_OPERATIONS:
         raise ValueError(f"unknown operation: {operation}")
     matched = authenticate(presented_key, env)
     if matched is None:
         return "anonymous"
-    if operation not in matched.operations:
+    permission = matched.permission_for(operation)
+    if permission is None:
         raise AuthorizationError("API key is not permitted for this operation")
-    if not matched.unrestricted_wings:
-        if wing is None or wing not in matched.wings:
+    requested_wings = _requested_wings(wing)
+    if requested_wings is None:
+        if not permission.unrestricted:
             raise AuthorizationError("API key is not permitted for this wing")
+    elif not requested_wings or any(not permission.permits(target) for target in requested_wings):
+        raise AuthorizationError("API key is not permitted for this wing")
     return matched.name

@@ -73,14 +73,18 @@ Prefer `PALACE_API_KEYS_FILE` for servers. It points to a JSON file owned by the
     {
       "name": "android-read-personal",
       "key": "replace-with-a-random-opaque-secret-of-at-least-16-characters",
-      "operations": ["read"],
-      "wings": ["personal"]
+      "permissions": {
+        "read": {"allow": ["personal"]}
+      }
     },
     {
       "name": "daemon-maintainer",
       "key": "replace-with-a-different-random-opaque-secret-of-at-least-16-characters",
-      "operations": ["read", "write", "admin"],
-      "wings": ["*"]
+      "permissions": {
+        "read": {"allow": ["*"]},
+        "write": {"allow": ["*"]},
+        "admin": {"allow": ["*"]}
+      }
     }
   ]
 }
@@ -92,9 +96,39 @@ install -m 600 /dev/null /etc/palace-daemon/keys.json
 PALACE_API_KEYS_FILE=/etc/palace-daemon/keys.json python main.py --manual
 ```
 
-`name` is the non-secret audit identity written to daemon logs. `key` values are independent opaque secrets (minimum 16 characters), never logged. `operations` are explicit: `read` for retrieval, `write` for named-wing creates/checkpoints, and `admin` for maintenance, imports, repair, backups, and deletion. Include every operation a client needs; permissions do not implicitly expand. `wings: ["*"]` is the only unrestricted form.
+`name` is the non-secret audit identity written to daemon logs. `key` values are independent opaque secrets (minimum 16 characters), never logged. `permissions` is keyed by explicit operations: `read` for retrieval, `write` for named-wing creates/checkpoints, and `admin` for maintenance, imports, repair, backups, and deletion. An operation is granted only when it appears in `permissions`.
 
-Restricted keys must supply a wing to read or write and cannot call cross-wing endpoints (`/stats`, `/graph`, `/health`, `/repair/status`) or drawer-ID mutations, because those could disclose another wing. Use an unrestricted maintenance key for those operations. The same fail-closed rule applies to MCP tools whose target wing cannot be determined.
+Each operation has a non-empty `allow` list and an optional `deny` list. `allow: ["*"]` permits every named wing; `deny` then subtracts protected wings for that operation. A request that does not identify every affected wing is permitted only by an unrestricted rule (`allow: ["*"]` with no denies). This fails closed for opaque drawer IDs and cross-wing MCP tools, so a protected-wing deny cannot be bypassed. A multi-wing MCP operation (for example, a tunnel) must be allowed for every named wing.
+
+For the shared Palace policy, configure bots without `admin`:
+
+```json
+{
+  "keys": [
+    {
+      "name": "kit",
+      "key": "replace-with-kit-secret",
+      "permissions": {
+        "read": {"allow": ["*"]},
+        "write": {"allow": ["*"], "deny": ["wing_wren"]}
+      }
+    },
+    {
+      "name": "wren",
+      "key": "replace-with-wren-secret",
+      "permissions": {
+        "read": {"allow": ["*"]},
+        "write": {"allow": ["*"], "deny": ["wing_kit", "carpe", "wing_mined"]}
+      }
+    }
+  ]
+}
+```
+
+#### Migration from `operations` / `wings`
+
+The original per-key form remains valid and keeps its exact behavior:
+`{"operations": ["read", "write"], "wings": ["personal"]}` grants those operations only for `personal`; `wings: ["*"]` remains unrestricted. Do not combine the legacy fields with `permissions` in one key. Migrate a key by replacing `operations` and `wings` with one `permissions` entry per operation. Use the new form whenever different operations need different wing scope or protected-wing denies.
 
 The existing `PALACE_API_KEY` remains supported as a migration path. It creates an in-memory `legacy-palace-api-key` grant with all operations and all wings. Set **either** `PALACE_API_KEYS_FILE` **or** `PALACE_API_KEY`, never both. All HTTP endpoints, including health and status, require `X-Api-Key` when either setting is configured. Query-string keys are not accepted.
 
