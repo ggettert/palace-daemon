@@ -273,6 +273,7 @@ _READ_TOOLS = {
 # release must not silently inherit write access before its impact is reviewed.
 _WRITE_TOOLS = {
     "mempalace_add_drawer",
+    "mempalace_checkpoint",
     "mempalace_diary_write",
     "mempalace_kg_add",
     "mempalace_kg_invalidate",
@@ -288,7 +289,6 @@ _ADMIN_TOOLS = {
     "mempalace_sync",
     "mempalace_reconnect",
     "mempalace_memories_filed_away",
-    "mempalace_checkpoint",
     "mempalace_hook_settings",
 }
 
@@ -725,6 +725,33 @@ _MCP_WING_ARGUMENTS: dict[str, tuple[str, ...]] = {
 }
 
 
+def _checkpoint_wings(arguments: dict) -> tuple[str, ...] | None:
+    """Return every named wing a checkpoint will write, or None if ambiguous."""
+    items = arguments.get("items")
+    if not isinstance(items, list) or not items:
+        return None
+
+    wings = []
+    for item in items:
+        if not isinstance(item, dict):
+            return None
+        wing = item.get("wing")
+        if not isinstance(wing, str) or not wing:
+            return None
+        wings.append(wing)
+
+    if "diary" in arguments:
+        diary = arguments["diary"]
+        if not isinstance(diary, dict):
+            return None
+        wing = diary.get("wing")
+        if not isinstance(wing, str) or not wing:
+            return None
+        wings.append(wing)
+
+    return tuple(wings)
+
+
 def _mcp_operation(tool_name: str) -> str:
     if tool_name in _READ_TOOLS:
         return "read"
@@ -750,6 +777,8 @@ def _mcp_policy(body: dict) -> tuple[str, str | tuple[str, ...] | None]:
     params = body.get("params") if isinstance(body.get("params"), dict) else {}
     tool_name = params.get("name") if isinstance(params.get("name"), str) else ""
     arguments = params.get("arguments") if isinstance(params.get("arguments"), dict) else {}
+    if tool_name == "mempalace_checkpoint":
+        return "write", _checkpoint_wings(arguments)
     wing_args = _MCP_WING_ARGUMENTS.get(tool_name)
     if not wing_args:
         return _mcp_operation(tool_name), None
