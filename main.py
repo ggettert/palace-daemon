@@ -16,7 +16,6 @@ Roadmap:
 import argparse
 import asyncio
 import functools
-import hmac
 import json
 import logging
 import os
@@ -46,6 +45,7 @@ from mempalace import repair as _mp_repair
 from mempalace.backends.chroma import quarantine_stale_hnsw
 
 import messages
+from access import AuthorizationError, KeyRingConfigurationError, authenticate, authorize, load_key_ring
 
 # ── Config (env vars override CLI defaults) ───────────────────────────────────
 
@@ -266,16 +266,46 @@ _READ_TOOLS = {
     "mempalace_check_duplicate",
     "mempalace_get_taxonomy",
     "mempalace_get_aaak_spec",
+}
+
+# State-changing tools that can safely be offered to a scoped write key.
+# Every other MCP tool defaults to admin: an upstream tool added after this
+# release must not silently inherit write access before its impact is reviewed.
+_WRITE_TOOLS = {
+    "mempalace_add_drawer",
+    "mempalace_diary_write",
+    "mempalace_kg_add",
+    "mempalace_kg_invalidate",
+    "mempalace_kg_supersede",
+    "mempalace_update_drawer",
+    "mempalace_create_tunnel",
+}
+
+# Import, index/cache maintenance, and configuration-changing tools are
+# privileged even though some of them also write a named wing.
+_ADMIN_TOOLS = {
+    "mempalace_mine",
+    "mempalace_sync",
+    "mempalace_reconnect",
+    "mempalace_memories_filed_away",
+    "mempalace_checkpoint",
     "mempalace_hook_settings",
 }
 
 
 def _check_auth(x_api_key: str | None):
-    key = os.getenv("PALACE_API_KEY", "")
-    if not key:
-        return
-    if not x_api_key or not hmac.compare_digest(x_api_key, key):
-        raise HTTPException(status_code=401, detail="Invalid API key")
+    """Validate a presented API key for direct endpoint compatibility only.
+
+    Route operation and wing scope are enforced by ASGI middleware. Direct
+    callers that need scoped authorization must call ``authorize`` with their
+    own operation and wing context before invoking an endpoint coroutine.
+    """
+    try:
+        authenticate(x_api_key)
+    except AuthorizationError as exc:
+        raise HTTPException(status_code=401, detail="Invalid API key") from exc
+    except KeyRingConfigurationError as exc:
+        raise HTTPException(status_code=500, detail="API key configuration error") from exc
 
 
 def _sem_for(request_dict: dict) -> asyncio.Semaphore:
@@ -546,6 +576,14 @@ async def _call(request_dict: dict, retry_on_hnsw: bool = True) -> dict:
 async def lifespan(app: FastAPI):
     import logging
     logger = logging.getLogger(__name__)
+
+    # Fail closed before accepting traffic if a configured key ring is unsafe
+    # or malformed. Secrets are never included in the error or logs.
+    try:
+        load_key_ring()
+    except KeyRingConfigurationError as exc:
+        logger.critical("Refusing to start with invalid API key configuration: %s", exc)
+        raise RuntimeError("invalid API key configuration") from exc
     
     # Uvicorn installs its own SIGINT/SIGTERM handlers that shut down gracefully;
     # we don't need to override them. Calling sys.exit() from inside an asyncio
@@ -668,6 +706,114 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="palace-daemon", lifespan=lifespan)
 
 
+# ── HTTP authorization ───────────────────────────────────────────────────────
+
+# A restricted key must name a wing for every request.  Endpoints such as
+# /stats, /graph, and drawer-id mutations span or discover arbitrary wings, so
+# they are deliberately unavailable to restricted keys rather than guessing and
+# risking a cross-wing disclosure.  An unrestricted key uses wings: ["*"].
+_MCP_WING_ARGUMENTS = {
+    "mempalace_add_drawer": "wing",
+    "mempalace_list_drawers": "wing",
+    "mempalace_search": "wing",
+    "mempalace_mine": "wing",
+    "mempalace_diary_write": "wing",
+}
+
+
+def _mcp_operation(tool_name: str) -> str:
+    if tool_name in _READ_TOOLS:
+        return "read"
+    if tool_name in _WRITE_TOOLS:
+        return "write"
+    # Deletions and all unclassified tools are administrative. This makes new
+    # upstream tools fail closed until they receive an explicit review.
+    return "admin"
+
+
+def _json_body(raw_body: bytes) -> dict:
+    """Best-effort parsing for authorization; route handlers own 400 responses."""
+    if not raw_body:
+        return {}
+    try:
+        value = json.loads(raw_body)
+    except (TypeError, json.JSONDecodeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _mcp_policy(body: dict) -> tuple[str, str | None]:
+    params = body.get("params") if isinstance(body.get("params"), dict) else {}
+    tool_name = params.get("name") if isinstance(params.get("name"), str) else ""
+    arguments = params.get("arguments") if isinstance(params.get("arguments"), dict) else {}
+    wing_arg = _MCP_WING_ARGUMENTS.get(tool_name)
+    wing = arguments.get(wing_arg) if wing_arg and isinstance(arguments.get(wing_arg), str) else None
+    return _mcp_operation(tool_name), wing
+
+
+def _request_policy(method: str, path: str, query: dict[str, str], body: dict) -> tuple[str, str | None]:
+    """Return the least-privilege operation and requested wing for a route."""
+    if method == "GET" and path in {"/health", "/stats", "/graph", "/viz", "/repair/status"}:
+        return "read", None
+    if method == "GET" and path in {"/search", "/context", "/list"}:
+        return "read", query.get("wing")
+    if method == "POST" and path == "/mcp":
+        return _mcp_policy(body)
+    if method == "POST" and path == "/memory":
+        return "write", body.get("wing", "general") if isinstance(body.get("wing", "general"), str) else None
+    if method == "POST" and path in {"/silent-save", "/digest"}:
+        # These handlers intentionally use an empty wing when omitted. Match
+        # that behavior so scoped keys fail closed instead of authorizing
+        # "general" and writing elsewhere.
+        return "write", body.get("wing", "") if isinstance(body.get("wing", ""), str) else None
+    if method == "POST" and path == "/mine":
+        # Importing an arbitrary server path is administrative even though it
+        # writes a named wing.
+        return "admin", body.get("wing") if isinstance(body.get("wing"), str) else None
+    if method == "PATCH" and path.startswith("/memory/"):
+        return "write", None
+    if method == "DELETE" and path.startswith("/memory/"):
+        return "admin", None
+    if method == "POST" and path in {"/flush", "/reload", "/backup", "/repair"}:
+        return "admin", None
+    # Unknown routes fail closed whenever authentication is configured.
+    return "admin", None
+
+
+@app.middleware("http")
+async def authorize_http_request(request: Request, call_next):
+    raw_body = await request.body()
+    body = _json_body(raw_body)
+    operation, wing = _request_policy(
+        request.method,
+        request.url.path,
+        dict(request.query_params),
+        body,
+    )
+    try:
+        identity = authorize(request.headers.get("x-api-key"), operation, wing)
+    except AuthorizationError as exc:
+        # Do not distinguish unknown keys from valid keys that lack permission.
+        _log.warning("Denied request method=%s path=%s operation=%s", request.method, request.url.path, operation)
+        return JSONResponse(status_code=403, content={"detail": "Not authorized"})
+    except KeyRingConfigurationError:
+        _log.critical("Rejecting request because API key configuration is invalid")
+        return JSONResponse(status_code=500, content={"detail": "API key configuration error"})
+
+    # Starlette consumes the receive channel in middleware. Reinstall it so
+    # endpoint handlers can parse the original JSON normally.
+    async def receive() -> dict:
+        return {"type": "http.request", "body": raw_body, "more_body": False}
+
+    request._receive = receive
+    request.state.audit_identity = identity
+    _log.info(
+        "Authorized request identity=%s method=%s path=%s operation=%s wing=%s",
+        identity, request.method, request.url.path, operation, wing or "-",
+    )
+    return await call_next(request)
+
+
 # ── MCP proxy ─────────────────────────────────────────────────────────────────
 
 @app.post("/mcp")
@@ -715,24 +861,40 @@ async def health():
 
 
 @app.get("/search")
-async def search(q: str, limit: int = 5, x_api_key: str | None = Header(default=None)):
+async def search(
+    q: str,
+    limit: int = 5,
+    wing: str | None = None,
+    x_api_key: str | None = Header(default=None),
+):
     _check_auth(x_api_key)
+    arguments: dict[str, Any] = {"query": q, "limit": limit}
+    if wing is not None:
+        arguments["wing"] = wing
     result = await _call({
         "jsonrpc": "2.0", "id": 1,
         "method": "tools/call",
-        "params": {"name": "mempalace_search", "arguments": {"query": q, "limit": limit}},
+        "params": {"name": "mempalace_search", "arguments": arguments},
     })
     return _unwrap(result)
 
 
 @app.get("/context")
-async def context(topic: str, limit: int = 5, x_api_key: str | None = Header(default=None)):
+async def context(
+    topic: str,
+    limit: int = 5,
+    wing: str | None = None,
+    x_api_key: str | None = Header(default=None),
+):
     # Alias for /search with a semantically friendlier name for LLM tool prompts
     _check_auth(x_api_key)
+    arguments: dict[str, Any] = {"query": topic, "limit": limit}
+    if wing is not None:
+        arguments["wing"] = wing
     result = await _call({
         "jsonrpc": "2.0", "id": 1,
         "method": "tools/call",
-        "params": {"name": "mempalace_search", "arguments": {"query": topic, "limit": limit}},
+        "params": {"name": "mempalace_search", "arguments": arguments},
     })
     return _unwrap(result)
 
@@ -1065,7 +1227,6 @@ _VIZ_HTML_CACHE: str | None = None
 
 @app.get("/viz", response_class=HTMLResponse)
 async def viz(
-    key: str | None = None,
     x_api_key: str | None = Header(default=None),
 ):
     """Self-contained status dashboard at /viz.
@@ -1075,12 +1236,9 @@ async def viz(
     KG force-graph (D3), wings bar chart, wing/room hierarchy (Mermaid),
     tunnels list, KG stats.
 
-    Auth: same as every other endpoint — ``X-Api-Key`` header. As an
-    ergonomic shortcut for browser bookmarking, ``?key=...`` is also
-    accepted; the page reads it from the URL and re-supplies it to the
-    data endpoints. The ``?key=...`` shape leaks the key into browser
-    history, proxy logs, and referer headers — prefer the header for
-    anything beyond a personal bookmark.
+    Auth: same as every other endpoint — ``X-Api-Key`` header only. Keys in
+    query strings are intentionally not accepted because they leak into
+    browser history, proxy logs, and Referer headers.
 
     The HTML template is read from disk lazily on the first request and
     cached in-process thereafter (one disk read per daemon process).
@@ -1089,11 +1247,7 @@ async def viz(
     #431 (CLI stats), #256 (sync_status MCP), #601 (brief overview) — none
     cherry-picked, just patterns synthesized over the daemon's /graph.
     """
-    # Accept the API key from either the X-Api-Key header (preferred) or
-    # the ?key= query parameter (bookmarkable). _check_auth is a no-op
-    # when PALACE_API_KEY is unset, so this preserves the
-    # zero-config-local-dev experience.
-    _check_auth(x_api_key or key)
+    _check_auth(x_api_key)
     global _VIZ_HTML_CACHE
     if _VIZ_HTML_CACHE is None:
         try:

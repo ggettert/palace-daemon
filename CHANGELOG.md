@@ -1,5 +1,8 @@
 ## [Unreleased]
 
+### Added
+- **Scoped API-key ring** — `PALACE_API_KEYS_FILE` loads a mode-`0600` JSON key ring with named opaque keys, explicit `read`/`write`/`admin` operations, and wing allowlists. Every HTTP route (including health/status and MCP) now has a fail-closed authorization policy and logs the non-secret key name as its audit identity. `PALACE_API_KEY` remains a full-access migration path; configuring both is rejected.
+
 # Changelog — continued
 
 ## [1.8.2] - 2026-07-06
