@@ -29,7 +29,8 @@ To prevent database corruption, this project enforces a strict **Single-Process 
 - **REST API** — search, store, and query the palace over HTTP (Android app, netdash, scripts)
 - **Concurrent access control** — three semaphores coordinate reads, writes, and mine jobs; tunable via `PALACE_MAX_READ_CONCURRENCY` / `PALACE_MAX_WRITE_CONCURRENCY`
 - **Isolated mining** — /mine runs under its own semaphore so bulk imports never stall live traffic
-- **Scoped API-key ring** — named opaque keys can be limited to read/write/admin operations and specific wings
+- **Scoped API-key ring** — named opaque keys can be limited to read/write/admin
+  operations and specific wings
 
 ## Requirements
 
@@ -59,7 +60,9 @@ To prevent database corruption, this project enforces a strict **Single-Process 
 > The `/mine` endpoint accepts arbitrary filesystem paths — anyone with access
 > can trigger reads from any directory on your server.
 
-For local network use, leaving auth disabled is fine. For remote access, always configure a key ring (or, temporarily during migration, the legacy API key):
+For local network use, leaving auth disabled is fine. For remote access,
+always configure a key ring (or, temporarily during migration, the legacy API
+key):
 
     PALACE_API_KEY=your-secret python main.py
 
@@ -143,7 +146,9 @@ Only runs while you're logged in. Use this if you don't have sudo or only need t
 >     rm ~/.config/systemd/user/palace-daemon.service
 >     systemctl --user daemon-reload
 
-Edit `palace-daemon.service` to set `PALACE_API_KEYS_FILE` (preferred), `PALACE_API_KEY` during migration, or a custom `--palace` path before installing.
+Edit `palace-daemon.service` to set `PALACE_API_KEYS_FILE` (preferred),
+`PALACE_API_KEY` during migration, or a custom `--palace` path before
+installing.
 
 The service uses `Type=notify` and `WatchdogSec=120`: the daemon signals systemd when it is ready and sends a watchdog heartbeat every 60 s. If the watchdog goes silent (e.g. the palace collection breaks), systemd kills and restarts the daemon automatically.
 
