@@ -210,5 +210,150 @@ class ScopedRouteAuthorizationTestCase(unittest.TestCase):
                 )
 
 
+class ProtectedWingPermissionTestCase(unittest.TestCase):
+    def setUp(self):
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.key_file = os.path.join(self.tempdir.name, "keys.json")
+        with open(self.key_file, "w", encoding="utf-8") as handle:
+            json.dump({"keys": [
+                {
+                    "name": "kit",
+                    "key": "kit-secret-0123456789",
+                    "permissions": {
+                        "read": {"allow": ["*"]},
+                        "write": {"allow": ["*"], "deny": ["wing_wren"]},
+                    },
+                },
+                {
+                    "name": "wren",
+                    "key": "wren-secret-012345678",
+                    "permissions": {
+                        "read": {"allow": ["*"]},
+                        "write": {"allow": ["*"], "deny": ["wing_kit", "carpe", "wing_mined"]},
+                    },
+                },
+            ]}, handle)
+        os.chmod(self.key_file, 0o600)
+        self.env = {"PALACE_API_KEYS_FILE": self.key_file}
+
+    def tearDown(self):
+        self.tempdir.cleanup()
+
+    def test_per_operation_protected_wing_rules(self):
+        self.assertEqual(authorize("kit-secret-0123456789", "read", "wing_wren", self.env), "kit")
+        self.assertEqual(authorize("kit-secret-0123456789", "write", "general", self.env), "kit")
+        self.assertEqual(authorize("wren-secret-012345678", "write", "general", self.env), "wren")
+        for key, wing in [
+            ("kit-secret-0123456789", "wing_wren"),
+            ("wren-secret-012345678", "wing_kit"),
+            ("wren-secret-012345678", "carpe"),
+            ("wren-secret-012345678", "wing_mined"),
+        ]:
+            with self.subTest(key=key, wing=wing), self.assertRaises(AuthorizationError):
+                authorize(key, "write", wing, self.env)
+        with self.assertRaises(AuthorizationError):
+            authorize("kit-secret-0123456789", "write", None, self.env)
+        with self.assertRaises(AuthorizationError):
+            authorize("kit-secret-0123456789", "admin", None, self.env)
+
+    def test_multi_wing_operation_requires_every_target_to_be_allowed(self):
+        self.assertEqual(
+            authorize("kit-secret-0123456789", "write", ("general", "shared"), self.env), "kit"
+        )
+        with self.assertRaises(AuthorizationError):
+            authorize("kit-secret-0123456789", "write", ("general", "wing_wren"), self.env)
+
+    def test_rejects_ambiguous_permission_rules(self):
+        invalid_permissions = [
+            {"write": {"allow": ["*"]}, "unknown": {"allow": ["*"]}},
+            {"write": {"allow": ["*"], "deny": ["*"]}},
+            {"write": {"allow": ["alpha"], "deny": ["alpha"]}},
+            {"write": {"allow": ["alpha", "alpha"]}},
+        ]
+        for permissions in invalid_permissions:
+            with self.subTest(permissions=permissions):
+                with open(self.key_file, "w", encoding="utf-8") as handle:
+                    json.dump({"keys": [{
+                        "name": "invalid", "key": "invalid-secret-012345", "permissions": permissions,
+                    }]}, handle)
+                os.chmod(self.key_file, 0o600)
+                access._key_ring_cache.clear()
+                with self.assertRaises(KeyRingConfigurationError):
+                    load_key_ring(self.env)
+
+
+class ProtectedWingRouteAuthorizationTestCase(unittest.TestCase):
+    def setUp(self):
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.key_file = os.path.join(self.tempdir.name, "keys.json")
+        with open(self.key_file, "w", encoding="utf-8") as handle:
+            json.dump({"keys": [
+                {
+                    "name": "kit", "key": "kit-secret-0123456789",
+                    "permissions": {
+                        "read": {"allow": ["*"]},
+                        "write": {"allow": ["*"], "deny": ["wing_wren"]},
+                    },
+                },
+                {
+                    "name": "wren", "key": "wren-secret-012345678",
+                    "permissions": {
+                        "read": {"allow": ["*"]},
+                        "write": {"allow": ["*"], "deny": ["wing_kit", "carpe", "wing_mined"]},
+                    },
+                },
+            ]}, handle)
+        os.chmod(self.key_file, 0o600)
+        self.environ = patch.dict(os.environ, {"PALACE_API_KEYS_FILE": self.key_file, "PALACE_API_KEY": ""}, clear=False)
+        self.environ.start()
+        self.call = AsyncMock(return_value={"result": {"content": [{"text": "{}"}]}})
+        self.call_patch = patch.object(main, "_call", self.call)
+        self.call_patch.start()
+        self.client = TestClient(main.app)
+
+    def tearDown(self):
+        self.client.close()
+        self.call_patch.stop()
+        self.environ.stop()
+        self.tempdir.cleanup()
+
+    def request(self, method, path, key, **kwargs):
+        return self.client.request(method, path, headers={"X-Api-Key": key}, **kwargs)
+
+    def test_http_allows_reads_but_denies_protected_writes(self):
+        self.assertEqual(self.request("GET", "/stats", "kit-secret-0123456789").status_code, 200)
+        self.assertEqual(
+            self.request("POST", "/memory", "kit-secret-0123456789", json={"wing": "general", "content": "ok"}).status_code,
+            200,
+        )
+        self.assertEqual(
+            self.request("POST", "/memory", "kit-secret-0123456789", json={"wing": "wing_wren", "content": "no"}).status_code,
+            403,
+        )
+        for wing in ("wing_kit", "carpe", "wing_mined"):
+            with self.subTest(wing=wing):
+                self.assertEqual(
+                    self.request("POST", "/silent-save", "wren-secret-012345678", json={"wing": wing, "entry": "no"}).status_code,
+                    403,
+                )
+
+    def test_mcp_enforces_single_and_multi_wing_writes(self):
+        add_drawer = {"params": {"name": "mempalace_add_drawer", "arguments": {"wing": "wing_wren", "room": "x", "content": "no"}}}
+        self.assertEqual(self.request("POST", "/mcp", "kit-secret-0123456789", json=add_drawer).status_code, 403)
+        add_drawer["params"]["arguments"]["wing"] = "general"
+        self.assertEqual(self.request("POST", "/mcp", "kit-secret-0123456789", json=add_drawer).status_code, 200)
+
+        tunnel = {"params": {"name": "mempalace_create_tunnel", "arguments": {
+            "source_wing": "general", "source_room": "a", "target_wing": "wing_wren", "target_room": "b",
+        }}}
+        self.assertEqual(self.request("POST", "/mcp", "kit-secret-0123456789", json=tunnel).status_code, 403)
+        tunnel["params"]["arguments"]["target_wing"] = "shared"
+        self.assertEqual(self.request("POST", "/mcp", "kit-secret-0123456789", json=tunnel).status_code, 200)
+
+    def test_mcp_write_without_a_determinable_wing_fails_closed(self):
+        body = {"params": {"name": "mempalace_kg_add", "arguments": {"subject": "x", "predicate": "y", "object": "z"}}}
+        self.assertEqual(self.request("POST", "/mcp", "kit-secret-0123456789", json=body).status_code, 403)
+
+
 if __name__ == "__main__":
     unittest.main()

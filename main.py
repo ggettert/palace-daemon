@@ -708,16 +708,20 @@ app = FastAPI(title="palace-daemon", lifespan=lifespan)
 
 # ── HTTP authorization ───────────────────────────────────────────────────────
 
-# A restricted key must name a wing for every request.  Endpoints such as
-# /stats, /graph, and drawer-id mutations span or discover arbitrary wings, so
-# they are deliberately unavailable to restricted keys rather than guessing and
-# risking a cross-wing disclosure.  An unrestricted key uses wings: ["*"].
-_MCP_WING_ARGUMENTS = {
-    "mempalace_add_drawer": "wing",
-    "mempalace_list_drawers": "wing",
-    "mempalace_search": "wing",
-    "mempalace_mine": "wing",
-    "mempalace_diary_write": "wing",
+# Requests without a determinable wing are deliberately passed as None. The
+# authorization layer permits them only to an unrestricted rule, so a key that
+# excludes protected wings cannot bypass those exclusions through a cross-wing
+# endpoint or an opaque drawer ID. MCP tools may name more than one wing.
+_MCP_WING_ARGUMENTS: dict[str, tuple[str, ...]] = {
+    "mempalace_add_drawer": ("wing",),
+    "mempalace_list_drawers": ("wing",),
+    "mempalace_search": ("wing",),
+    "mempalace_mine": ("wing",),
+    "mempalace_diary_write": ("wing",),
+    "mempalace_list_rooms": ("wing",),
+    "mempalace_follow_tunnels": ("wing",),
+    "mempalace_find_tunnels": ("wing_a", "wing_b"),
+    "mempalace_create_tunnel": ("source_wing", "target_wing"),
 }
 
 
@@ -742,16 +746,22 @@ def _json_body(raw_body: bytes) -> dict:
     return value if isinstance(value, dict) else {}
 
 
-def _mcp_policy(body: dict) -> tuple[str, str | None]:
+def _mcp_policy(body: dict) -> tuple[str, str | tuple[str, ...] | None]:
     params = body.get("params") if isinstance(body.get("params"), dict) else {}
     tool_name = params.get("name") if isinstance(params.get("name"), str) else ""
     arguments = params.get("arguments") if isinstance(params.get("arguments"), dict) else {}
-    wing_arg = _MCP_WING_ARGUMENTS.get(tool_name)
-    wing = arguments.get(wing_arg) if wing_arg and isinstance(arguments.get(wing_arg), str) else None
-    return _mcp_operation(tool_name), wing
+    wing_args = _MCP_WING_ARGUMENTS.get(tool_name)
+    if not wing_args:
+        return _mcp_operation(tool_name), None
+    wings = tuple(arguments.get(argument) for argument in wing_args)
+    if any(not isinstance(wing, str) or not wing for wing in wings):
+        return _mcp_operation(tool_name), None
+    return _mcp_operation(tool_name), wings[0] if len(wings) == 1 else wings
 
 
-def _request_policy(method: str, path: str, query: dict[str, str], body: dict) -> tuple[str, str | None]:
+def _request_policy(
+    method: str, path: str, query: dict[str, str], body: dict
+) -> tuple[str, str | tuple[str, ...] | None]:
     """Return the least-privilege operation and requested wing for a route."""
     if method == "GET" and path in {"/health", "/stats", "/graph", "/viz", "/repair/status"}:
         return "read", None
