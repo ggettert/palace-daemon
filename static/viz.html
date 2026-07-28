@@ -229,21 +229,13 @@ const PALETTE = {
   unknown:  getComputedStyle(document.documentElement).getPropertyValue("--node-unknown").trim(),
 };
 
-//------------------------------------------------------------------ params + auth
+//------------------------------------------------------------------ params
 const params = new URLSearchParams(location.search);
 const REFRESH_SECONDS = parseInt(params.get("refresh") || "0", 10);
-// `?key=...` is supported as a bookmarkable shortcut for the API key. This
-// is convenient but the key will appear in the browser's history, in any
-// referer header sent to a third-party origin, and in the access logs of
-// any forward proxy or reverse proxy on the path. **Do not use ?key= when
-// the dashboard might be screen-shared, screencast, or proxied through a
-// shared intermediary.** Prefer the `X-Api-Key` header for those cases.
-const KEY = params.get("key") || "";
 
 function withAuth(opts) {
   opts = opts || {};
   const headers = Object.assign({}, opts.headers || {});
-  if (KEY) headers["x-api-key"] = KEY;
   return Object.assign({}, opts, { headers });
 }
 
