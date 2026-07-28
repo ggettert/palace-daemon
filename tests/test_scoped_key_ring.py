@@ -190,7 +190,6 @@ class ScopedRouteAuthorizationTestCase(unittest.TestCase):
             "mempalace_sync",
             "mempalace_reconnect",
             "mempalace_memories_filed_away",
-            "mempalace_checkpoint",
             "mempalace_hook_settings",
         ]:
             with self.subTest(tool_name=tool_name):
@@ -200,6 +199,22 @@ class ScopedRouteAuthorizationTestCase(unittest.TestCase):
                     self.request("POST", "/mcp", "writer-secret-012345", json=body).status_code,
                     403,
                 )
+
+    def test_checkpoint_is_scoped_write_but_other_maintenance_tools_remain_admin(self):
+        checkpoint = {"params": {"name": "mempalace_checkpoint", "arguments": {
+            "items": [{"wing": "alpha"}],
+        }}}
+        self.assertEqual(main._mcp_policy(checkpoint), ("write", ("alpha",)))
+        self.assertEqual(
+            self.request("POST", "/mcp", "writer-secret-012345", json=checkpoint).status_code,
+            200,
+        )
+        maintenance = {"params": {"name": "mempalace_sync", "arguments": {}}}
+        self.assertEqual(main._mcp_policy(maintenance)[0], "admin")
+        self.assertEqual(
+            self.request("POST", "/mcp", "writer-secret-012345", json=maintenance).status_code,
+            403,
+        )
 
     def test_silent_save_and_digest_omitted_wing_require_unrestricted_write(self):
         for path in ["/silent-save", "/digest"]:
@@ -379,6 +394,37 @@ class ProtectedWingRouteAuthorizationTestCase(unittest.TestCase):
     def test_mcp_write_without_a_determinable_wing_fails_closed(self):
         body = {"params": {"name": "mempalace_kg_add", "arguments": {"subject": "x", "predicate": "y", "object": "z"}}}
         self.assertEqual(self.request("POST", "/mcp", "kit-secret-0123456789", json=body).status_code, 403)
+
+    def test_checkpoint_authorizes_every_item_and_diary_wing(self):
+        body = {"params": {"name": "mempalace_checkpoint", "arguments": {
+            "items": [{"wing": "general"}, {"wing": "shared"}],
+            "diary": {"wing": "general"},
+        }}}
+        self.assertEqual(main._mcp_policy(body), ("write", ("general", "shared", "general")))
+        self.assertEqual(self.request("POST", "/mcp", "kit-secret-0123456789", json=body).status_code, 200)
+
+        body["params"]["arguments"]["diary"]["wing"] = "wing_wren"
+        self.assertEqual(self.request("POST", "/mcp", "kit-secret-0123456789", json=body).status_code, 403)
+        body["params"]["arguments"]["diary"]["wing"] = "general"
+        body["params"]["arguments"]["items"][1]["wing"] = "wing_wren"
+        self.assertEqual(self.request("POST", "/mcp", "kit-secret-0123456789", json=body).status_code, 403)
+
+    def test_checkpoint_missing_or_malformed_wing_scope_fails_closed(self):
+        cases = [
+            {},
+            {"items": []},
+            {"items": [{}]},
+            {"items": [{"wing": "general"}], "diary": {}},
+            {"items": [{"wing": "general"}], "diary": []},
+        ]
+        for arguments in cases:
+            with self.subTest(arguments=arguments):
+                body = {"params": {"name": "mempalace_checkpoint", "arguments": arguments}}
+                self.assertEqual(main._mcp_policy(body), ("write", None))
+                self.assertEqual(
+                    self.request("POST", "/mcp", "kit-secret-0123456789", json=body).status_code,
+                    403,
+                )
 
 
 if __name__ == "__main__":
