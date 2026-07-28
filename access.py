@@ -50,13 +50,8 @@ class _KeyRingFileState:
 _key_ring_cache: dict[Path, tuple[_KeyRingFileState, tuple[KeyGrant, ...]]] = {}
 
 
-def _require_safe_file(path: Path) -> _KeyRingFileState:
-    try:
-        # lstat is intentional: a key-ring path must never redirect through a
-        # symlink, even when its target is an otherwise-safe regular file.
-        info = path.lstat()
-    except OSError as exc:
-        raise KeyRingConfigurationError(f"cannot lstat PALACE_API_KEYS_FILE: {exc}") from exc
+def _safe_file_state(info: os.stat_result) -> _KeyRingFileState:
+    """Validate a key-ring file stat result and return cache metadata."""
     if stat.S_ISLNK(info.st_mode):
         raise KeyRingConfigurationError("PALACE_API_KEYS_FILE must not be a symlink")
     if not stat.S_ISREG(info.st_mode):
@@ -76,6 +71,42 @@ def _require_safe_file(path: Path) -> _KeyRingFileState:
         mode=stat.S_IMODE(info.st_mode),
         uid=info.st_uid,
     )
+
+
+def _require_safe_file(path: Path) -> _KeyRingFileState:
+    try:
+        # lstat is intentional: a key-ring path must never redirect through a
+        # symlink, even when its target is an otherwise-safe regular file.
+        return _safe_file_state(path.lstat())
+    except OSError as exc:
+        raise KeyRingConfigurationError(f"cannot lstat PALACE_API_KEYS_FILE: {exc}") from exc
+
+
+def _read_safe_key_ring(path: Path, expected_state: _KeyRingFileState) -> object | None:
+    """Read exactly the validated file, returning None when it was rotated.
+
+    ``lstat`` followed by ``Path.read_text`` would leave a window in which a
+    path replacement could redirect the read. Open with ``O_NOFOLLOW`` and
+    compare ``fstat`` metadata to the pre-open state instead; atomic rotations
+    simply cause the caller to retry.
+    """
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(path, flags)
+    except OSError as exc:
+        raise KeyRingConfigurationError(f"cannot open PALACE_API_KEYS_FILE: {exc}") from exc
+    try:
+        state = _safe_file_state(os.fstat(fd))
+        if state != expected_state:
+            return None
+        with os.fdopen(fd, encoding="utf-8") as handle:
+            fd = -1
+            return json.loads(handle.read())
+    except (OSError, json.JSONDecodeError) as exc:
+        raise KeyRingConfigurationError(f"invalid PALACE_API_KEYS_FILE: {exc}") from exc
+    finally:
+        if fd >= 0:
+            os.close(fd)
 
 
 def _parse_key_ring(raw: object) -> tuple[KeyGrant, ...]:
@@ -132,11 +163,8 @@ def load_key_ring(env: Mapping[str, str] | None = None) -> tuple[KeyGrant, ...]:
             cached = _key_ring_cache.get(path)
             if cached is not None and cached[0] == state:
                 return cached[1]
-            try:
-                raw = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError) as exc:
-                raise KeyRingConfigurationError(f"invalid PALACE_API_KEYS_FILE: {exc}") from exc
-            if _require_safe_file(path) != state:
+            raw = _read_safe_key_ring(path, state)
+            if raw is None or _require_safe_file(path) != state:
                 continue
             ring = _parse_key_ring(raw)
             # Cache only after the complete validation path succeeds. The state

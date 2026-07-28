@@ -268,10 +268,21 @@ _READ_TOOLS = {
     "mempalace_get_aaak_spec",
 }
 
+# State-changing tools that can safely be offered to a scoped write key.
+# Every other MCP tool defaults to admin: an upstream tool added after this
+# release must not silently inherit write access before its impact is reviewed.
+_WRITE_TOOLS = {
+    "mempalace_add_drawer",
+    "mempalace_diary_write",
+    "mempalace_kg_add",
+    "mempalace_kg_invalidate",
+    "mempalace_kg_supersede",
+    "mempalace_update_drawer",
+    "mempalace_create_tunnel",
+}
+
 # Import, index/cache maintenance, and configuration-changing tools are
-# privileged even though some of them also write a named wing. Keep this list
-# explicit so new tools fail closed as writes rather than silently inheriting
-# broader permissions.
+# privileged even though some of them also write a named wing.
 _ADMIN_TOOLS = {
     "mempalace_mine",
     "mempalace_sync",
@@ -713,9 +724,11 @@ _MCP_WING_ARGUMENTS = {
 def _mcp_operation(tool_name: str) -> str:
     if tool_name in _READ_TOOLS:
         return "read"
-    if tool_name.startswith("mempalace_delete_") or tool_name in _ADMIN_TOOLS:
-        return "admin"
-    return "write"
+    if tool_name in _WRITE_TOOLS:
+        return "write"
+    # Deletions and all unclassified tools are administrative. This makes new
+    # upstream tools fail closed until they receive an explicit review.
+    return "admin"
 
 
 def _json_body(raw_body: bytes) -> dict:
@@ -848,24 +861,40 @@ async def health():
 
 
 @app.get("/search")
-async def search(q: str, limit: int = 5, x_api_key: str | None = Header(default=None)):
+async def search(
+    q: str,
+    limit: int = 5,
+    wing: str | None = None,
+    x_api_key: str | None = Header(default=None),
+):
     _check_auth(x_api_key)
+    arguments: dict[str, Any] = {"query": q, "limit": limit}
+    if wing is not None:
+        arguments["wing"] = wing
     result = await _call({
         "jsonrpc": "2.0", "id": 1,
         "method": "tools/call",
-        "params": {"name": "mempalace_search", "arguments": {"query": q, "limit": limit}},
+        "params": {"name": "mempalace_search", "arguments": arguments},
     })
     return _unwrap(result)
 
 
 @app.get("/context")
-async def context(topic: str, limit: int = 5, x_api_key: str | None = Header(default=None)):
+async def context(
+    topic: str,
+    limit: int = 5,
+    wing: str | None = None,
+    x_api_key: str | None = Header(default=None),
+):
     # Alias for /search with a semantically friendlier name for LLM tool prompts
     _check_auth(x_api_key)
+    arguments: dict[str, Any] = {"query": topic, "limit": limit}
+    if wing is not None:
+        arguments["wing"] = wing
     result = await _call({
         "jsonrpc": "2.0", "id": 1,
         "method": "tools/call",
-        "params": {"name": "mempalace_search", "arguments": {"query": topic, "limit": limit}},
+        "params": {"name": "mempalace_search", "arguments": arguments},
     })
     return _unwrap(result)
 

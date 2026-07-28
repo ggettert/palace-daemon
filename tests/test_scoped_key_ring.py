@@ -4,6 +4,7 @@ import os
 import stat
 import tempfile
 import unittest
+from pathlib import Path
 from contextlib import contextmanager
 from unittest.mock import AsyncMock, patch
 
@@ -83,6 +84,16 @@ class KeyRingTestCase(unittest.TestCase):
             self.assertEqual(load_key_ring(self.env)[0].name, "rotated")
             self.assertEqual(loads.call_count, 2)
 
+    def test_key_ring_read_rejects_file_replaced_after_validation(self):
+        expected = access._require_safe_file(Path(self.key_file))
+        replacement = os.path.join(self.tempdir.name, "replacement.json")
+        with open(replacement, "w", encoding="utf-8") as handle:
+            handle.write('{"keys": []}')
+        os.chmod(replacement, 0o600)
+        os.replace(replacement, self.key_file)
+
+        self.assertIsNone(access._read_safe_key_ring(Path(self.key_file), expected))
+
 
 class ScopedRouteAuthorizationTestCase(unittest.TestCase):
     def setUp(self):
@@ -142,6 +153,23 @@ class ScopedRouteAuthorizationTestCase(unittest.TestCase):
         self.assertEqual(self.request("GET", "/search?q=x&wing=beta", "reader-secret-012345").status_code, 403)
         self.assertEqual(self.request("GET", "/search?q=x", "reader-secret-012345").status_code, 403)
         self.assertEqual(self.request("GET", "/stats", "reader-secret-012345").status_code, 403)
+
+    def test_search_and_context_forward_the_authorized_wing(self):
+        for path in ["/search?q=x&wing=alpha", "/context?topic=x&wing=alpha"]:
+            with self.subTest(path=path):
+                self.call.reset_mock()
+                response = self.request("GET", path, "reader-secret-012345")
+                self.assertEqual(response.status_code, 200)
+                arguments = self.call.await_args.args[0]["params"]["arguments"]
+                self.assertEqual(arguments["wing"], "alpha")
+
+    def test_unknown_mcp_tool_requires_admin(self):
+        body = {"params": {"name": "mempalace_future_write", "arguments": {"wing": "alpha"}}}
+        self.assertEqual(main._mcp_policy(body)[0], "admin")
+        self.assertEqual(
+            self.request("POST", "/mcp", "writer-secret-012345", json=body).status_code,
+            403,
+        )
 
     def test_write_and_admin_route_denials(self):
         self.assertEqual(self.request("POST", "/memory", "writer-secret-012345", json={"wing": "alpha", "content": "ok"}).status_code, 200)
