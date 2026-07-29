@@ -104,6 +104,14 @@ class ScopedRouteAuthorizationTestCase(unittest.TestCase):
                 {"name": "reader", "key": "reader-secret-012345", "operations": ["read"], "wings": ["alpha"]},
                 {"name": "writer", "key": "writer-secret-012345", "operations": ["write"], "wings": ["alpha"]},
                 {"name": "operator", "key": "operator-secret-012345", "operations": ["read", "write", "admin"], "wings": ["*"]},
+                {
+                    "name": "wren",
+                    "key": "wren-secret-012345678",
+                    "permissions": {
+                        "read": {"allow": ["*"]},
+                        "write": {"allow": ["*"], "deny": ["wing_kit"]},
+                    },
+                },
             ]}, handle)
         os.chmod(self.key_file, stat.S_IRUSR | stat.S_IWUSR)
         self.env = {"PALACE_API_KEYS_FILE": self.key_file}
@@ -140,7 +148,7 @@ class ScopedRouteAuthorizationTestCase(unittest.TestCase):
             ("POST", "/reload", "admin"), ("POST", "/backup", "admin"),
             ("POST", "/repair", "admin"),
         ]
-        mcp = {"params": {"name": "mempalace_search", "arguments": {"wing": "alpha"}}}
+        mcp = {"method": "tools/call", "params": {"name": "mempalace_search", "arguments": {"wing": "alpha"}}}
         for method, path, operation in cases:
             body = mcp if path == "/mcp" else {"wing": "alpha"}
             actual, _ = main._request_policy(method, path, {"wing": "alpha"}, body)
@@ -164,13 +172,54 @@ class ScopedRouteAuthorizationTestCase(unittest.TestCase):
                 arguments = self.call.await_args.args[0]["params"]["arguments"]
                 self.assertEqual(arguments["wing"], "alpha")
 
+    def test_mcp_protocol_handshake_allows_scoped_read_key_only(self):
+        for method in ["initialize", "notifications/initialized", "tools/list", "ping"]:
+            with self.subTest(method=method):
+                body = {"jsonrpc": "2.0", "id": 1, "method": method, "params": {}}
+                self.assertEqual(main._mcp_policy(body), ("read", None))
+                self.assertEqual(
+                    self.request("POST", "/mcp", "wren-secret-012345678", json=body).status_code,
+                    200,
+                )
+
+        # A scoped key that names only alpha cannot access unscoped discovery.
+        self.assertEqual(
+            self.request("POST", "/mcp", "reader-secret-012345", json={
+                "jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {},
+            }).status_code,
+            403,
+        )
+
     def test_unknown_mcp_tool_requires_admin(self):
-        body = {"params": {"name": "mempalace_future_write", "arguments": {"wing": "alpha"}}}
+        body = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "mempalace_future_write", "arguments": {"wing": "alpha"}}}
         self.assertEqual(main._mcp_policy(body)[0], "admin")
         self.assertEqual(
             self.request("POST", "/mcp", "writer-secret-012345", json=body).status_code,
             403,
         )
+
+    def test_scoped_mcp_key_cannot_invoke_admin_or_unknown_operations(self):
+        admin_tool = {
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "mempalace_mine", "arguments": {"wing": "alpha"}},
+        }
+        unknown_method = {
+            "jsonrpc": "2.0", "id": 1, "method": "resources/list",
+            "params": {"name": "mempalace_search", "arguments": {"wing": "alpha"}},
+        }
+        protected_write = {
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {
+                "name": "mempalace_add_drawer",
+                "arguments": {"wing": "wing_kit"},
+            },
+        }
+        for body in [admin_tool, unknown_method, protected_write]:
+            with self.subTest(body=body):
+                self.assertEqual(
+                    self.request("POST", "/mcp", "wren-secret-012345678", json=body).status_code,
+                    403,
+                )
 
     def test_write_and_admin_route_denials(self):
         self.assertEqual(self.request("POST", "/memory", "writer-secret-012345", json={"wing": "alpha", "content": "ok"}).status_code, 200)
@@ -193,7 +242,7 @@ class ScopedRouteAuthorizationTestCase(unittest.TestCase):
             "mempalace_hook_settings",
         ]:
             with self.subTest(tool_name=tool_name):
-                body = {"params": {"name": tool_name, "arguments": {"wing": "alpha"}}}
+                body = {"method": "tools/call", "params": {"name": tool_name, "arguments": {"wing": "alpha"}}}
                 self.assertEqual(main._mcp_policy(body)[0], "admin")
                 self.assertEqual(
                     self.request("POST", "/mcp", "writer-secret-012345", json=body).status_code,
@@ -201,7 +250,7 @@ class ScopedRouteAuthorizationTestCase(unittest.TestCase):
                 )
 
     def test_checkpoint_is_scoped_write_but_other_maintenance_tools_remain_admin(self):
-        checkpoint = {"params": {"name": "mempalace_checkpoint", "arguments": {
+        checkpoint = {"method": "tools/call", "params": {"name": "mempalace_checkpoint", "arguments": {
             "items": [{"wing": "alpha"}],
         }}}
         self.assertEqual(main._mcp_policy(checkpoint), ("write", ("alpha",)))
@@ -209,7 +258,7 @@ class ScopedRouteAuthorizationTestCase(unittest.TestCase):
             self.request("POST", "/mcp", "writer-secret-012345", json=checkpoint).status_code,
             200,
         )
-        maintenance = {"params": {"name": "mempalace_sync", "arguments": {}}}
+        maintenance = {"method": "tools/call", "params": {"name": "mempalace_sync", "arguments": {}}}
         self.assertEqual(main._mcp_policy(maintenance)[0], "admin")
         self.assertEqual(
             self.request("POST", "/mcp", "writer-secret-012345", json=maintenance).status_code,
@@ -379,12 +428,12 @@ class ProtectedWingRouteAuthorizationTestCase(unittest.TestCase):
                 )
 
     def test_mcp_enforces_single_and_multi_wing_writes(self):
-        add_drawer = {"params": {"name": "mempalace_add_drawer", "arguments": {"wing": "wing_wren", "room": "x", "content": "no"}}}
+        add_drawer = {"method": "tools/call", "params": {"name": "mempalace_add_drawer", "arguments": {"wing": "wing_wren", "room": "x", "content": "no"}}}
         self.assertEqual(self.request("POST", "/mcp", "kit-secret-0123456789", json=add_drawer).status_code, 403)
         add_drawer["params"]["arguments"]["wing"] = "general"
         self.assertEqual(self.request("POST", "/mcp", "kit-secret-0123456789", json=add_drawer).status_code, 200)
 
-        tunnel = {"params": {"name": "mempalace_create_tunnel", "arguments": {
+        tunnel = {"method": "tools/call", "params": {"name": "mempalace_create_tunnel", "arguments": {
             "source_wing": "general", "source_room": "a", "target_wing": "wing_wren", "target_room": "b",
         }}}
         self.assertEqual(self.request("POST", "/mcp", "kit-secret-0123456789", json=tunnel).status_code, 403)
@@ -392,11 +441,11 @@ class ProtectedWingRouteAuthorizationTestCase(unittest.TestCase):
         self.assertEqual(self.request("POST", "/mcp", "kit-secret-0123456789", json=tunnel).status_code, 200)
 
     def test_mcp_write_without_a_determinable_wing_fails_closed(self):
-        body = {"params": {"name": "mempalace_kg_add", "arguments": {"subject": "x", "predicate": "y", "object": "z"}}}
+        body = {"method": "tools/call", "params": {"name": "mempalace_kg_add", "arguments": {"subject": "x", "predicate": "y", "object": "z"}}}
         self.assertEqual(self.request("POST", "/mcp", "kit-secret-0123456789", json=body).status_code, 403)
 
     def test_checkpoint_authorizes_every_item_and_diary_wing(self):
-        body = {"params": {"name": "mempalace_checkpoint", "arguments": {
+        body = {"method": "tools/call", "params": {"name": "mempalace_checkpoint", "arguments": {
             "items": [{"wing": "general"}, {"wing": "shared"}],
             "diary": {"wing": "general"},
         }}}
@@ -419,7 +468,7 @@ class ProtectedWingRouteAuthorizationTestCase(unittest.TestCase):
         ]
         for arguments in cases:
             with self.subTest(arguments=arguments):
-                body = {"params": {"name": "mempalace_checkpoint", "arguments": arguments}}
+                body = {"method": "tools/call", "params": {"name": "mempalace_checkpoint", "arguments": arguments}}
                 self.assertEqual(main._mcp_policy(body), ("write", None))
                 self.assertEqual(
                     self.request("POST", "/mcp", "kit-secret-0123456789", json=body).status_code,
