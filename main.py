@@ -730,6 +730,10 @@ _MCP_WING_ARGUMENTS: dict[str, tuple[str, ...]] = {
     "mempalace_search": ("wing",),
     "mempalace_mine": ("wing",),
     "mempalace_diary_write": ("wing",),
+    # KG facts are global, but MemPalace exposes the owning palace location
+    # explicitly as source_closet. Treat that named provenance target as the
+    # write scope; source_drawer_id remains opaque and cannot establish scope.
+    "mempalace_kg_add": ("source_closet",),
     "mempalace_list_rooms": ("wing",),
     "mempalace_follow_tunnels": ("wing",),
     "mempalace_find_tunnels": ("wing_a", "wing_b"),

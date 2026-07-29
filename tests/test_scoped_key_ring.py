@@ -440,9 +440,51 @@ class ProtectedWingRouteAuthorizationTestCase(unittest.TestCase):
         tunnel["params"]["arguments"]["target_wing"] = "shared"
         self.assertEqual(self.request("POST", "/mcp", "kit-secret-0123456789", json=tunnel).status_code, 200)
 
-    def test_mcp_write_without_a_determinable_wing_fails_closed(self):
-        body = {"method": "tools/call", "params": {"name": "mempalace_kg_add", "arguments": {"subject": "x", "predicate": "y", "object": "z"}}}
-        self.assertEqual(self.request("POST", "/mcp", "kit-secret-0123456789", json=body).status_code, 403)
+    def test_wren_can_add_scoped_kg_facts_and_tunnels(self):
+        kg_add = {"method": "tools/call", "params": {"name": "mempalace_kg_add", "arguments": {
+            "subject": "wren", "predicate": "works_on", "object": "daemon", "source_closet": "general",
+        }}}
+        self.assertEqual(main._mcp_policy(kg_add), ("write", "general"))
+        self.assertEqual(self.request("POST", "/mcp", "wren-secret-012345678", json=kg_add).status_code, 200)
+
+        tunnel = {"method": "tools/call", "params": {"name": "mempalace_create_tunnel", "arguments": {
+            "source_wing": "general", "source_room": "a", "target_wing": "shared", "target_room": "b",
+        }}}
+        self.assertEqual(main._mcp_policy(tunnel), ("write", ("general", "shared")))
+        self.assertEqual(self.request("POST", "/mcp", "wren-secret-012345678", json=tunnel).status_code, 200)
+
+    def test_wren_scoped_writes_deny_protected_and_ambiguous_targets(self):
+        kg_add = {"method": "tools/call", "params": {"name": "mempalace_kg_add", "arguments": {
+            "subject": "wren", "predicate": "works_on", "object": "daemon", "source_closet": "carpe",
+        }}}
+        self.assertEqual(self.request("POST", "/mcp", "wren-secret-012345678", json=kg_add).status_code, 403)
+
+        tunnel = {"method": "tools/call", "params": {"name": "mempalace_create_tunnel", "arguments": {
+            "source_wing": "general", "source_room": "a", "target_wing": "wing_kit", "target_room": "b",
+        }}}
+        self.assertEqual(self.request("POST", "/mcp", "wren-secret-012345678", json=tunnel).status_code, 403)
+
+        ambiguous = {"method": "tools/call", "params": {"name": "mempalace_kg_add", "arguments": {
+            "subject": "wren", "predicate": "works_on", "object": "daemon",
+        }}}
+        self.assertEqual(main._mcp_policy(ambiguous), ("write", None))
+        self.assertEqual(self.request("POST", "/mcp", "wren-secret-012345678", json=ambiguous).status_code, 403)
+
+        # The schema exposes only an opaque drawer ID for source lookup; a
+        # requested destination wing cannot prove the drawer's current scope.
+        opaque_drawer = {"method": "tools/call", "params": {"name": "mempalace_update_drawer", "arguments": {
+            "drawer_id": "opaque", "wing": "general", "content": "updated",
+        }}}
+        self.assertEqual(main._mcp_policy(opaque_drawer), ("write", None))
+        self.assertEqual(self.request("POST", "/mcp", "wren-secret-012345678", json=opaque_drawer).status_code, 403)
+
+        # Invalidate and supersede identify facts only by their triple values,
+        # not by a target wing, so they stay fail-closed for scoped keys.
+        for tool_name in ("mempalace_kg_invalidate", "mempalace_kg_supersede"):
+            with self.subTest(tool_name=tool_name):
+                body = {"method": "tools/call", "params": {"name": tool_name, "arguments": {}}}
+                self.assertEqual(main._mcp_policy(body), ("write", None))
+                self.assertEqual(self.request("POST", "/mcp", "wren-secret-012345678", json=body).status_code, 403)
 
     def test_checkpoint_authorizes_every_item_and_diary_wing(self):
         body = {"method": "tools/call", "params": {"name": "mempalace_checkpoint", "arguments": {
