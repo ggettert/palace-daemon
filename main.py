@@ -730,10 +730,8 @@ _MCP_WING_ARGUMENTS: dict[str, tuple[str, ...]] = {
     "mempalace_search": ("wing",),
     "mempalace_mine": ("wing",),
     "mempalace_diary_write": ("wing",),
-    # KG facts are global, but MemPalace exposes the owning palace location
-    # explicitly as source_closet. Treat that named provenance target as the
-    # write scope; source_drawer_id remains opaque and cannot establish scope.
-    "mempalace_kg_add": ("source_closet",),
+    # KG writes are handled separately below. Provenance submitted by the
+    # caller (including source_closet) is not an authorization boundary.
     "mempalace_list_rooms": ("wing",),
     "mempalace_follow_tunnels": ("wing",),
     "mempalace_find_tunnels": ("wing_a", "wing_b"),
@@ -778,6 +776,39 @@ def _mcp_operation(tool_name: str) -> str:
     return "admin"
 
 
+def _drawer_wing(drawer_id: object) -> str | None:
+    """Resolve a drawer's wing from the palace, failing closed on uncertainty."""
+    if not isinstance(drawer_id, str) or not drawer_id:
+        return None
+    try:
+        collection = _mp._get_collection()
+        if collection is None:
+            return None
+        result = collection.get(ids=[drawer_id], include=["metadatas"])
+        ids = result.get("ids") if isinstance(result, dict) else None
+        metadatas = result.get("metadatas") if isinstance(result, dict) else None
+        if not isinstance(ids, list) or len(ids) != 1 or not isinstance(metadatas, list) or len(metadatas) != 1:
+            return None
+        metadata = metadatas[0]
+        wing = metadata.get("wing") if isinstance(metadata, dict) else None
+        return wing if isinstance(wing, str) and wing else None
+    except Exception:
+        _log.warning("Could not resolve KG provenance drawer for authorization", exc_info=True)
+        return None
+
+
+def _kg_add_wing(arguments: dict) -> str | None:
+    """Resolve KG write scope from immutable server-side drawer metadata.
+
+    ``source_closet`` is caller-controlled provenance and must never determine
+    a scoped key's authority. A scoped caller therefore needs an existing
+    source drawer whose stored wing can be verified here. Unrestricted keys
+    retain support for provenance-free KG facts because ``None`` is permitted
+    by their unrestricted write rule.
+    """
+    return _drawer_wing(arguments.get("source_drawer_id"))
+
+
 def _json_body(raw_body: bytes) -> dict:
     """Best-effort parsing for authorization; route handlers own 400 responses."""
     if not raw_body:
@@ -804,6 +835,8 @@ def _mcp_policy(body: dict) -> tuple[str, str | tuple[str, ...] | None]:
     arguments = params.get("arguments") if isinstance(params.get("arguments"), dict) else {}
     if tool_name == "mempalace_checkpoint":
         return "write", _checkpoint_wings(arguments)
+    if tool_name == "mempalace_kg_add":
+        return "write", _kg_add_wing(arguments)
     wing_args = _MCP_WING_ARGUMENTS.get(tool_name)
     if not wing_args:
         return _mcp_operation(tool_name), None

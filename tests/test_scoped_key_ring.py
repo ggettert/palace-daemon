@@ -399,10 +399,17 @@ class ProtectedWingRouteAuthorizationTestCase(unittest.TestCase):
         self.call = AsyncMock(return_value={"result": {"content": [{"text": "{}"}]}})
         self.call_patch = patch.object(main, "_call", self.call)
         self.call_patch.start()
+        self.drawer_wing_patch = patch.object(
+            main,
+            "_drawer_wing",
+            side_effect={"general-drawer": "general", "carpe-drawer": "carpe"}.get,
+        )
+        self.drawer_wing_patch.start()
         self.client = TestClient(main.app)
 
     def tearDown(self):
         self.client.close()
+        self.drawer_wing_patch.stop()
         self.call_patch.stop()
         self.environ.stop()
         self.tempdir.cleanup()
@@ -442,7 +449,8 @@ class ProtectedWingRouteAuthorizationTestCase(unittest.TestCase):
 
     def test_wren_can_add_scoped_kg_facts_and_tunnels(self):
         kg_add = {"method": "tools/call", "params": {"name": "mempalace_kg_add", "arguments": {
-            "subject": "wren", "predicate": "works_on", "object": "daemon", "source_closet": "general",
+            "subject": "wren", "predicate": "works_on", "object": "daemon",
+            "source_drawer_id": "general-drawer", "source_closet": "untrusted-provenance",
         }}}
         self.assertEqual(main._mcp_policy(kg_add), ("write", "general"))
         self.assertEqual(self.request("POST", "/mcp", "wren-secret-012345678", json=kg_add).status_code, 200)
@@ -454,9 +462,13 @@ class ProtectedWingRouteAuthorizationTestCase(unittest.TestCase):
         self.assertEqual(self.request("POST", "/mcp", "wren-secret-012345678", json=tunnel).status_code, 200)
 
     def test_wren_scoped_writes_deny_protected_and_ambiguous_targets(self):
+        # source_closet is caller-controlled. A scoped key cannot claim an
+        # allowed closet while attaching a fact to a protected drawer.
         kg_add = {"method": "tools/call", "params": {"name": "mempalace_kg_add", "arguments": {
-            "subject": "wren", "predicate": "works_on", "object": "daemon", "source_closet": "carpe",
+            "subject": "wren", "predicate": "works_on", "object": "daemon",
+            "source_drawer_id": "carpe-drawer", "source_closet": "general",
         }}}
+        self.assertEqual(main._mcp_policy(kg_add), ("write", "carpe"))
         self.assertEqual(self.request("POST", "/mcp", "wren-secret-012345678", json=kg_add).status_code, 403)
 
         tunnel = {"method": "tools/call", "params": {"name": "mempalace_create_tunnel", "arguments": {
