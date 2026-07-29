@@ -712,6 +712,18 @@ app = FastAPI(title="palace-daemon", lifespan=lifespan)
 # authorization layer permits them only to an unrestricted rule, so a key that
 # excludes protected wings cannot bypass those exclusions through a cross-wing
 # endpoint or an opaque drawer ID. MCP tools may name more than one wing.
+# Only these non-tool MCP methods are safe discovery/liveness protocol traffic.
+# Keep this intentionally small: every other method is administrative unless it
+# is an explicitly classified ``tools/call`` below. The upstream MCP server
+# currently supports initialize, ping, notifications, and tools/list; only the
+# initialized notification is required by the standard client handshake.
+_MCP_READ_METHODS = frozenset({
+    "initialize",
+    "notifications/initialized",
+    "ping",
+    "tools/list",
+})
+
 _MCP_WING_ARGUMENTS: dict[str, tuple[str, ...]] = {
     "mempalace_add_drawer": ("wing",),
     "mempalace_list_drawers": ("wing",),
@@ -774,6 +786,15 @@ def _json_body(raw_body: bytes) -> dict:
 
 
 def _mcp_policy(body: dict) -> tuple[str, str | tuple[str, ...] | None]:
+    """Classify a single MCP request, failing closed for unknown methods."""
+    method = body.get("method")
+    if method in _MCP_READ_METHODS:
+        return "read", None
+    if method != "tools/call":
+        # A request that merely resembles a known tool call must not acquire
+        # that tool's privileges under an unknown MCP method.
+        return "admin", None
+
     params = body.get("params") if isinstance(body.get("params"), dict) else {}
     tool_name = params.get("name") if isinstance(params.get("name"), str) else ""
     arguments = params.get("arguments") if isinstance(params.get("arguments"), dict) else {}
