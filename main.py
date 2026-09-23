@@ -35,7 +35,7 @@ try:
 except ImportError:
     _anthropic = None
 from fastapi import FastAPI, Header, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 
 import subprocess as _subprocess
 import time as _time
@@ -547,7 +547,7 @@ async def _do_silent_save_write(payload: dict) -> dict:
         return {"success": False, "error": str(e)}
 
 
-async def _call(request_dict: dict, retry_on_hnsw: bool = True) -> dict:
+async def _call(request_dict: dict, retry_on_hnsw: bool = True) -> dict | None:
     async with _sem_for(request_dict):
         loop = asyncio.get_running_loop()
         try:
@@ -567,7 +567,12 @@ async def _call(request_dict: dict, retry_on_hnsw: bool = True) -> dict:
                     result["error"]["message"] += " (Daemon hint: HNSW index stale. Auto-repair attempted but index might still be inconsistent)"
                 elif is_hnsw_error and tool_name not in _READ_TOOLS:
                     result["error"]["message"] += " (Daemon hint: HNSW error on write op — manual /reload may be needed)"
-            return result or {}
+            # JSON-RPC notifications (e.g. notifications/initialized) have no
+            # id and _mp.handle_request returns None for them per spec — do
+            # not coerce that into a falsy-but-truthy {} response body here.
+            # mcp_proxy() below turns None into an empty-body 202, matching
+            # the notification semantics tools/list, ping, etc. do not have.
+            return result
         except Exception as e:
             return {"jsonrpc": "2.0", "id": request_dict.get("id"), "error": {"code": -32000, "message": str(e)}}
 
@@ -914,13 +919,19 @@ async def authorize_http_request(request: Request, call_next):
 # ── MCP proxy ─────────────────────────────────────────────────────────────────
 
 @app.post("/mcp")
-async def mcp_proxy(request: Request, x_api_key: str | None = Header(default=None)) -> JSONResponse:
+async def mcp_proxy(request: Request, x_api_key: str | None = Header(default=None)) -> Response:
     _check_auth(x_api_key)
     try:
         body = await request.json()
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON")
     response = await _call(body)
+    if response is None:
+        # JSON-RPC notifications (no "id", e.g. notifications/initialized)
+        # get no response body per spec. Returning JSONResponse({}) here
+        # previously sent a 200 with a literal "{}" body, which the OpenClaw
+        # MCP client's notification handling rejected as invalid.
+        return Response(status_code=202)
     return JSONResponse(content=response)
 
 

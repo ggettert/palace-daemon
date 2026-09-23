@@ -175,11 +175,21 @@ class ScopedRouteAuthorizationTestCase(unittest.TestCase):
     def test_mcp_protocol_handshake_allows_scoped_read_key_only(self):
         for method in ["initialize", "notifications/initialized", "tools/list", "ping"]:
             with self.subTest(method=method):
-                body = {"jsonrpc": "2.0", "id": 1, "method": method, "params": {}}
+                body = {"jsonrpc": "2.0", "method": method, "params": {}}
+                if method != "notifications/initialized":
+                    body["id"] = 1
+                self.call.return_value = (
+                    None if method == "notifications/initialized"
+                    else {"jsonrpc": "2.0", "id": 1, "result": {}}
+                )
                 self.assertEqual(main._mcp_policy(body), ("read", None))
+                # notifications/initialized carries no "id" reply per JSON-RPC
+                # and gets a bare 202 with no body; every other handshake
+                # method still returns 200 with a JSON-RPC result body.
+                expected_status = 202 if method == "notifications/initialized" else 200
                 self.assertEqual(
                     self.request("POST", "/mcp", "wren-secret-012345678", json=body).status_code,
-                    200,
+                    expected_status,
                 )
 
         # A scoped key that names only alpha cannot access unscoped discovery.
@@ -189,6 +199,24 @@ class ScopedRouteAuthorizationTestCase(unittest.TestCase):
             }).status_code,
             403,
         )
+
+    def test_mcp_notification_gets_empty_body_not_literal_braces(self):
+        # Exercise the full production route and _call() path while replacing
+        # only the upstream MemPalace dispatcher at the process boundary.
+        # handle_request returns None for notifications, which _call() must
+        # preserve so mcp_proxy can emit an empty-body response.
+        self.call_patch.stop()
+        try:
+            with patch.object(main._mp, "handle_request", return_value=None) as handle_request:
+                body = {"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}}
+                response = self.request("POST", "/mcp", "wren-secret-012345678", json=body)
+        finally:
+            self.call_patch.start()
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.content, b"")
+        self.assertEqual(len(response.content), 0)
+        handle_request.assert_called_once_with(body)
 
     def test_unknown_mcp_tool_requires_admin(self):
         body = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "mempalace_future_write", "arguments": {"wing": "alpha"}}}
